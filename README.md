@@ -1,7 +1,7 @@
 Gemmini Spike ISA Functional Model Extensions
 =============================================
 
-This repository builds libgemmini.so, which can be dynamically linked into Spike to support executing custom Gemmin instructions.
+This repository builds libgemmini.so, which can be dynamically linked into Spike to support executing custom Gemmini instructions.
 
 To use this, first install a recent version of [spike](https://github.com/riscv-software-src/riscv-isa-sim), and set the `$RISCV` environment variable to the install location.
 
