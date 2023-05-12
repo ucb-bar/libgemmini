@@ -674,6 +674,8 @@ void gemmini_t::loop_ws(reg_t rs1, reg_t rs2) {
   const uint8_t act = (rs1 >> 8) & 0x7;
   const bool a_transpose = rs2 & 1;
   const bool b_transpose = (rs2 >> 1) & 1;
+  uint8_t a_spad_id = (rs1 >> 18) & 0b11;
+  uint8_t b_spad_id = (rs1 >> 16) & 0b11;
 
   const uint16_t I = gemmini_state.loop_ws_I;
   const uint16_t J = gemmini_state.loop_ws_J;
@@ -693,11 +695,13 @@ void gemmini_t::loop_ws(reg_t rs1, reg_t rs2) {
     exit(1);
   }
 
-  const uint32_t A_sp_addr_start = 0;
-  const uint32_t B_sp_addr_start = (BANK_NUM * BANK_ROWS / 2) - K * J * DIM;
+  uint32_t A_sp_addr_start = 0;
+  uint32_t B_sp_addr_start = (BANK_NUM * BANK_ROWS / 2);// - K * J * DIM;
   const uint32_t D_sp_addr_start = 1 << (ADDR_LEN-1);
   const uint32_t C_sp_addr_start = (3 << (ADDR_LEN-2)) | (full_C << (ADDR_LEN-3));
-
+  if(a_spad_id == 2) A_sp_addr_start = (BANK_NUM * BANK_ROWS) / 4;
+  if(b_spad_id == 2) B_sp_addr_start = ((BANK_NUM * BANK_ROWS) / 4) * 3;
+  
   if (gemmini_state.loop_ws_D != 0) {
     for (uint16_t i = 0; i < I; i++) {
       for (uint16_t j = 0; j < J; j++) {
@@ -726,7 +730,7 @@ void gemmini_t::loop_ws(reg_t rs1, reg_t rs2) {
         const uint32_t C_sp_addr = C_sp_addr_start + (i*J + j)*DIM;
 
         // Mvin A
-        if (j == 0) {
+        if (j == 0 && gemmini_state.loop_ws_A != 0) {
           uint64_t dram_addr, cols, rows;
 
           if (a_transpose) {
@@ -745,7 +749,7 @@ void gemmini_t::loop_ws(reg_t rs1, reg_t rs2) {
         }
 
         // Mvin B
-        if (i == 0) {
+        if (i == 0 && gemmini_state.loop_ws_B != 0) {
           uint64_t dram_addr, cols, rows;
 
           if (b_transpose) {
@@ -1002,7 +1006,9 @@ void gemmini_t::loop_conv_ws(reg_t rs1, reg_t rs2) {
   const bool downsample = (rs2 >> 1) & 1;
   const bool input_dilated = (rs2 >> 2) & 1;
   const bool activation = (rs2 >> 3) & 3;
-
+  uint8_t a_spad_id = (rs1 >> 18) & 0b11;
+  uint8_t b_spad_id = (rs1 >> 16) & 0b11;
+  
   if (max_pixels_per_row == 0)
     max_pixels_per_row = 1;
 
@@ -1079,11 +1085,12 @@ void gemmini_t::loop_conv_ws(reg_t rs1, reg_t rs2) {
   static uint32_t D_sp_addr_row = 0;
   static uint32_t C_sp_addr_row = 0;
 
-  const uint32_t A_sp_addr_start = 0;
-  const uint32_t B_sp_addr_start = BANK_NUM * BANK_ROWS - B_rows;
+  uint32_t A_sp_addr_start = 0;
+  uint32_t B_sp_addr_start = BANK_NUM * BANK_ROWS / 2;// - B_rows;
   const uint32_t D_sp_addr_start = (1 << (ADDR_LEN - 1)) + D_sp_addr_row;
   const uint32_t C_sp_addr_start = (3 << (ADDR_LEN - 2)) + C_sp_addr_row;
-
+  if(a_spad_id == 2) A_sp_addr_start = (BANK_NUM * BANK_ROWS) / 4;
+  if(b_spad_id == 2) B_sp_addr_start = ((BANK_NUM * BANK_ROWS) / 4) * 3;
   if (bias != 0) {
     D_sp_addr_row = (D_sp_addr_row + ACC_ROWS / 2) % ACC_ROWS;
   }
@@ -1129,7 +1136,7 @@ void gemmini_t::loop_conv_ws(reg_t rs1, reg_t rs2) {
 #define US(x) ((x) << (downsample))
 
   // mvin input
-  {
+  if(input != 0){
     int16_t max_chs_per_mvin = ichs < MAX_BLOCK_LEN * DIM ? ichs :
       MAX_BLOCK_LEN * DIM;
     if (trans_input_3120) {
@@ -1208,7 +1215,7 @@ void gemmini_t::loop_conv_ws(reg_t rs1, reg_t rs2) {
   }
 
   // mvin weights
-  {
+  if (weights != 0){
     uint16_t max_chs_per_mvin = ochs < MAX_BLOCK_LEN * DIM ? ochs :
       MAX_BLOCK_LEN * DIM;
     if (trans_weight_0132) {
