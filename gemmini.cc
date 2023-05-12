@@ -696,11 +696,11 @@ void gemmini_t::loop_ws(reg_t rs1, reg_t rs2) {
   }
 
   uint32_t A_sp_addr_start = 0;
-  uint32_t B_sp_addr_start = (BANK_NUM * BANK_ROWS / 2);// - K * J * DIM;
+  uint32_t B_sp_addr_start = (BANK_NUM * BANK_ROWS / 2) - K * J * DIM;
   const uint32_t D_sp_addr_start = 1 << (ADDR_LEN-1);
   const uint32_t C_sp_addr_start = (3 << (ADDR_LEN-2)) | (full_C << (ADDR_LEN-3));
-  if(a_spad_id == 2) A_sp_addr_start = (BANK_NUM * BANK_ROWS) / 4;
-  if(b_spad_id == 2) B_sp_addr_start = ((BANK_NUM * BANK_ROWS) / 4) * 3;
+  if(a_spad_id == 2) A_sp_addr_start = (BANK_NUM * BANK_ROWS) / 2;
+  if(b_spad_id == 2) B_sp_addr_start = (BANK_NUM * BANK_ROWS) - K * J * DIM;
   
   if (gemmini_state.loop_ws_D != 0) {
     for (uint16_t i = 0; i < I; i++) {
@@ -1086,11 +1086,11 @@ void gemmini_t::loop_conv_ws(reg_t rs1, reg_t rs2) {
   static uint32_t C_sp_addr_row = 0;
 
   uint32_t A_sp_addr_start = 0;
-  uint32_t B_sp_addr_start = BANK_NUM * BANK_ROWS / 2;// - B_rows;
+  uint32_t B_sp_addr_start = BANK_NUM * BANK_ROWS / 2 - B_rows;
   const uint32_t D_sp_addr_start = (1 << (ADDR_LEN - 1)) + D_sp_addr_row;
   const uint32_t C_sp_addr_start = (3 << (ADDR_LEN - 2)) + C_sp_addr_row;
-  if(a_spad_id == 2) A_sp_addr_start = (BANK_NUM * BANK_ROWS) / 4;
-  if(b_spad_id == 2) B_sp_addr_start = ((BANK_NUM * BANK_ROWS) / 4) * 3;
+  if(a_spad_id == 2) A_sp_addr_start = (BANK_NUM * BANK_ROWS) / 2;
+  if(b_spad_id == 2) B_sp_addr_start = (BANK_NUM * BANK_ROWS) - B_rows;
   if (bias != 0) {
     D_sp_addr_row = (D_sp_addr_row + ACC_ROWS / 2) % ACC_ROWS;
   }
