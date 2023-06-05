@@ -674,6 +674,8 @@ void gemmini_t::loop_ws(reg_t rs1, reg_t rs2) {
   const uint8_t act = (rs1 >> 8) & 0x7;
   const bool a_transpose = rs2 & 1;
   const bool b_transpose = (rs2 >> 1) & 1;
+  uint8_t a_spad_id = (rs1 >> 18) & 0b11;
+  uint8_t b_spad_id = (rs1 >> 16) & 0b11;
 
   const uint16_t I = gemmini_state.loop_ws_I;
   const uint16_t J = gemmini_state.loop_ws_J;
@@ -693,11 +695,13 @@ void gemmini_t::loop_ws(reg_t rs1, reg_t rs2) {
     exit(1);
   }
 
-  const uint32_t A_sp_addr_start = 0;
-  const uint32_t B_sp_addr_start = (BANK_NUM * BANK_ROWS / 2) - K * J * DIM;
+  uint32_t A_sp_addr_start = 0;
+  uint32_t B_sp_addr_start = (BANK_NUM * BANK_ROWS / 2) - K * J * DIM;
   const uint32_t D_sp_addr_start = 1 << (ADDR_LEN-1);
   const uint32_t C_sp_addr_start = (3 << (ADDR_LEN-2)) | (full_C << (ADDR_LEN-3));
-
+  if(a_spad_id == 2) A_sp_addr_start = (BANK_NUM * BANK_ROWS) / 2;
+  if(b_spad_id == 2) B_sp_addr_start = (BANK_NUM * BANK_ROWS) - K * J * DIM;
+  
   if (gemmini_state.loop_ws_D != 0) {
     for (uint16_t i = 0; i < I; i++) {
       for (uint16_t j = 0; j < J; j++) {
@@ -726,7 +730,7 @@ void gemmini_t::loop_ws(reg_t rs1, reg_t rs2) {
         const uint32_t C_sp_addr = C_sp_addr_start + (i*J + j)*DIM;
 
         // Mvin A
-        if (j == 0) {
+        if (j == 0 && gemmini_state.loop_ws_A != 0) {
           uint64_t dram_addr, cols, rows;
 
           if (a_transpose) {
@@ -745,7 +749,7 @@ void gemmini_t::loop_ws(reg_t rs1, reg_t rs2) {
         }
 
         // Mvin B
-        if (i == 0) {
+        if (i == 0 && gemmini_state.loop_ws_B != 0) {
           uint64_t dram_addr, cols, rows;
 
           if (b_transpose) {
@@ -1002,7 +1006,9 @@ void gemmini_t::loop_conv_ws(reg_t rs1, reg_t rs2) {
   const bool downsample = (rs2 >> 1) & 1;
   const bool input_dilated = (rs2 >> 2) & 1;
   const bool activation = (rs2 >> 3) & 3;
-
+  uint8_t a_spad_id = (rs1 >> 18) & 0b11;
+  uint8_t b_spad_id = (rs1 >> 16) & 0b11;
+  
   if (max_pixels_per_row == 0)
     max_pixels_per_row = 1;
 
@@ -1014,6 +1020,9 @@ void gemmini_t::loop_conv_ws(reg_t rs1, reg_t rs2) {
   const uint16_t in_dim = gemmini_state.loop_conv_ws_in_dim;
   const uint16_t in_channels = gemmini_state.loop_conv_ws_in_channels;
   const uint16_t out_channels = gemmini_state.loop_conv_ws_out_channels;
+  const uint16_t in_stride = gemmini_state.loop_conv_ws_in_stride;
+  const uint16_t out_stride = gemmini_state.loop_conv_ws_out_stride;
+  const uint16_t weight_stride = gemmini_state.loop_conv_ws_weight_stride;
   const uint16_t out_dim = gemmini_state.loop_conv_ws_out_dim;
   const uint16_t pool_out_dim = gemmini_state.loop_conv_ws_pool_out_dim;
   const uint16_t stride = gemmini_state.loop_conv_ws_stride;
@@ -1076,11 +1085,12 @@ void gemmini_t::loop_conv_ws(reg_t rs1, reg_t rs2) {
   static uint32_t D_sp_addr_row = 0;
   static uint32_t C_sp_addr_row = 0;
 
-  const uint32_t A_sp_addr_start = 0;
-  const uint32_t B_sp_addr_start = BANK_NUM * BANK_ROWS - B_rows;
+  uint32_t A_sp_addr_start = 0;
+  uint32_t B_sp_addr_start = BANK_NUM * BANK_ROWS / 2 - B_rows;
   const uint32_t D_sp_addr_start = (1 << (ADDR_LEN - 1)) + D_sp_addr_row;
   const uint32_t C_sp_addr_start = (3 << (ADDR_LEN - 2)) + C_sp_addr_row;
-
+  if(a_spad_id == 2) A_sp_addr_start = (BANK_NUM * BANK_ROWS) / 2;
+  if(b_spad_id == 2) B_sp_addr_start = (BANK_NUM * BANK_ROWS) - B_rows;
   if (bias != 0) {
     D_sp_addr_row = (D_sp_addr_row + ACC_ROWS / 2) % ACC_ROWS;
   }
@@ -1126,7 +1136,7 @@ void gemmini_t::loop_conv_ws(reg_t rs1, reg_t rs2) {
 #define US(x) ((x) << (downsample))
 
   // mvin input
-  {
+  if(input != 0){
     int16_t max_chs_per_mvin = ichs < MAX_BLOCK_LEN * DIM ? ichs :
       MAX_BLOCK_LEN * DIM;
     if (trans_input_3120) {
@@ -1136,7 +1146,7 @@ void gemmini_t::loop_conv_ws(reg_t rs1, reg_t rs2) {
 
     const uint32_t dram_stride = trans_input_3120 ?
       batch_size * sizeof(elem_t) :
-      in_channels * sizeof(elem_t);
+      in_stride * sizeof(elem_t);
 
     const int spad_stride = trans_input_3120 ?
       ichs * DS(irows) * DS(icols) :
@@ -1184,7 +1194,7 @@ void gemmini_t::loop_conv_ws(reg_t rs1, reg_t rs2) {
 
             const bool is_zeros = irow < 0 || irow >= irows_unpadded || icol < 0 || icol >= icols_unpadded;
 
-            uint64_t in = input + ((b*in_dim*in_dim + irow*in_dim + icol) * in_channels + ich) * sizeof(elem_t);
+            uint64_t in = input + ((b*in_dim*in_dim + irow*in_dim + icol) * in_stride + ich) * sizeof(elem_t);
             if (is_zeros) {
               in = 0;
             } else if (trans_input_3120) {
@@ -1205,7 +1215,7 @@ void gemmini_t::loop_conv_ws(reg_t rs1, reg_t rs2) {
   }
 
   // mvin weights
-  {
+  if (weights != 0){
     uint16_t max_chs_per_mvin = ochs < MAX_BLOCK_LEN * DIM ? ochs :
       MAX_BLOCK_LEN * DIM;
     if (trans_weight_0132) {
@@ -1213,7 +1223,7 @@ void gemmini_t::loop_conv_ws(reg_t rs1, reg_t rs2) {
           MAX_BLOCK_LEN * DIM;
     }
 
-    size_t dram_stride = out_channels * sizeof(elem_t);
+    size_t dram_stride = weight_stride * sizeof(elem_t);
     if (dw) {
       dram_stride = sizeof(elem_t);
     } else if (trans_weight_1203) {
@@ -1251,7 +1261,7 @@ void gemmini_t::loop_conv_ws(reg_t rs1, reg_t rs2) {
               B_sp_addr = B_sp_addr_start + (kch / DIM) * krows * kcols * ochs + krow * kcols * ochs + kcol * ochs + och;
             }
 
-            auto w = weights + ((krow*kernel_dim*in_channels + kcol*in_channels + kch) * out_channels + och)*sizeof(elem_t);
+            auto w = weights + ((krow*kernel_dim*in_channels + kcol*in_channels + kch) * weight_stride + och)*sizeof(elem_t);
             if (dw) {
               w = (weights + krow * kernel_dim + kcol)*sizeof(elem_t);
             } else if (trans_weight_1203) {
@@ -1391,7 +1401,7 @@ void gemmini_t::loop_conv_ws(reg_t rs1, reg_t rs2) {
 
             const uint32_t C_sp_addr = C_sp_addr_start + (och / DIM) * batches * orows * ocols + b * orows * ocols + orow * ocols + ocol;
 
-            auto out = output + ((b*out_dim*out_dim + orow*out_dim + ocol) * out_channels + och) * sizeof(elem_t);
+            auto out = output + ((b*out_dim*out_dim + orow*out_dim + ocol) * out_stride + och) * sizeof(elem_t);
             if (trans_output_1203) {
               out = output + ((orow*out_dim*batch_size + ocol*batch_size + b) * out_channels + och) * sizeof(elem_t);
             }
@@ -1417,7 +1427,7 @@ void gemmini_t::loop_conv_ws(reg_t rs1, reg_t rs2) {
       (activation << 2) |
       2,
       ((uint64_t)(acc_scale_t_to_acc_scale_t_bits(acc_scale)) << 32) |
-      (out_channels * sizeof(elem_t)));
+      (out_stride * sizeof(elem_t)));
 
     for (int b = 0; b < batches; b++) {
       for (int poch = 0; poch < pochs; poch += DIM) {
@@ -1425,7 +1435,7 @@ void gemmini_t::loop_conv_ws(reg_t rs1, reg_t rs2) {
 
         const uint32_t C_sp_addr = C_sp_addr_start + (poch / DIM) * batches * orows * ocols + b * orows * ocols;
 
-        mvout(output + ((b * pool_out_dim * pool_out_dim)*out_channels + poch) * sizeof(elem_t),
+        mvout(output + ((b * pool_out_dim * pool_out_dim)*out_stride + poch) * sizeof(elem_t),
           ((uint64_t)channels << 32) | C_sp_addr);
       }
     }
@@ -1478,10 +1488,13 @@ void gemmini_t::loop_conv_ws_config_3(reg_t rs1, reg_t rs2) {
 void gemmini_t::loop_conv_ws_config_4(reg_t rs1, reg_t rs2) {
   gemmini_state.loop_conv_ws_orows = (rs1  >> 48) & 0xFFFF;
   gemmini_state.loop_conv_ws_prad = (rs1 >> 32) & 0xFFFF;
-  gemmini_state.loop_conv_ws_pupad = (rs1 >> 16) & 0xFFFF;
-  gemmini_state.loop_conv_ws_pdpad = rs1 & 0xFFFF;
+  gemmini_state.loop_conv_ws_pupad = (rs1 >> 21) & 0xFF;
+  gemmini_state.loop_conv_ws_pdpad = (rs1 >> 10) & 0xFF;
+  gemmini_state.loop_conv_ws_kernel_dilation = rs1 & 0xFF;
 
-  gemmini_state.loop_conv_ws_kernel_dilation = (rs2 >> 16) & 0xFFFF;
+  gemmini_state.loop_conv_ws_in_stride = (rs2 >> 48) & 0xFFFF;
+  gemmini_state.loop_conv_ws_weight_stride = (rs2 >> 32) & 0xFFFF;
+  gemmini_state.loop_conv_ws_out_stride = (rs2 >> 16) & 0xFFFF;
   gemmini_state.loop_conv_ws_ocols = rs2 & 0xFFFF;
 }
 
