@@ -676,6 +676,7 @@ void gemmini_t::loop_ws(reg_t rs1, reg_t rs2) {
   const bool b_transpose = (rs2 >> 1) & 1;
   uint8_t a_spad_id = (rs1 >> 18) & 0b11;
   uint8_t b_spad_id = (rs1 >> 16) & 0b11;
+  const bool is_resadd = (rs2 >> 2) & 1;
 
   const uint16_t I = gemmini_state.loop_ws_I;
   const uint16_t J = gemmini_state.loop_ws_J;
@@ -701,6 +702,37 @@ void gemmini_t::loop_ws(reg_t rs1, reg_t rs2) {
   const uint32_t C_sp_addr_start = (3 << (ADDR_LEN-2)) | (full_C << (ADDR_LEN-3));
   if(a_spad_id == 2) A_sp_addr_start = (BANK_NUM * BANK_ROWS) / 2;
   if(b_spad_id == 2) B_sp_addr_start = (BANK_NUM * BANK_ROWS) - K * J * DIM;
+  if(is_resadd) {
+    A_sp_addr_start = 1 << (ADDR_LEN - 1);
+    B_sp_addr_start = 3 << (ADDR_LEN - 2);
+    for(uint16_t i = 0; i < I; i++){
+      for(uint16_t j = 0; j < J; j++){
+        const uint32_t A_sp_addr = A_sp_addr_start + (i*J+j)*DIM;
+        const uint32_t B_sp_addr = B_sp_addr_start + (i*J+j)*DIM;
+        const uint32_t C_sp_addr = C_sp_addr_start + (i*J+j)*DIM;
+        uint64_t dram_addr, cols, rows;
+        dram_addr = gemmini_state.loop_ws_A + (i*gemmini_state.loop_ws_A_stride + j) * DIM * sizeof(elem_t);
+        cols = DIM - (j == J-1 ? pad_J : 0);
+        rows = DIM - (i == I-1 ? pad_I : 0);
+        mvin(dram_addr, (rows << 48) | (cols << 32) | A_sp_addr, 0);
+
+        dram_addr = gemmini_state.loop_ws_B + (i*gemmini_state.loop_ws_B_stride + j) * DIM * sizeof(elem_t);
+        cols = DIM - (j == J-1 ? pad_J : 0);
+        rows = DIM - (i == I-1 ? pad_I : 0);
+        mvin(dram_addr, (rows << 48) | (cols << 32) | B_sp_addr, 1);
+        if(gemmini_state.loop_ws_C != 0){
+          const size_t sizeof_C = full_C ? sizeof(acc_t) : sizeof(elem_t);
+          const uint64_t C_dram_addr = gemmini_state.loop_ws_C +
+            (i*gemmini_state.loop_ws_C_stride + j) * DIM * sizeof_C;
+          const uint64_t C_cols = DIM - (j == J - 1 ? pad_J : 0);
+          const uint64_t C_rows = DIM - (i == I - 1 ? pad_I : 0);
+
+          mvout(C_dram_addr, (C_rows << 48) | (C_cols << 32) | C_sp_addr);
+        }
+      }
+    }
+    return;
+  }
   
   if (gemmini_state.loop_ws_D != 0) {
     for (uint16_t i = 0; i < I; i++) {
@@ -768,7 +800,7 @@ void gemmini_t::loop_ws(reg_t rs1, reg_t rs2) {
         }
 
         // Compute
-        {
+        if(!is_resadd) {
           uint32_t pre_sp_addr = i == 0 ? B_sp_addr : GARBAGE_ADDR;
           uint32_t out_sp_addr = C_sp_addr;
 
