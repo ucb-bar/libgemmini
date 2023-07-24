@@ -1049,14 +1049,17 @@ void gemmini_t::loop_conv_ws(reg_t rs1, reg_t rs2) {
 #endif
 
   const uint16_t batch_size = gemmini_state.loop_conv_ws_batch_size;
-  const uint16_t in_dim = gemmini_state.loop_conv_ws_in_dim;
+  const uint16_t in_col_dim = gemmini_state.loop_conv_ws_in_col_dim;
+  const uint16_t in_row_dim = gemmini_state.loop_conv_ws_in_row_dim;
   const uint16_t in_channels = gemmini_state.loop_conv_ws_in_channels;
   const uint16_t out_channels = gemmini_state.loop_conv_ws_out_channels;
   const uint16_t in_stride = gemmini_state.loop_conv_ws_in_stride;
   const uint16_t out_stride = gemmini_state.loop_conv_ws_out_stride;
   const uint16_t weight_stride = gemmini_state.loop_conv_ws_weight_stride;
-  const uint16_t out_dim = gemmini_state.loop_conv_ws_out_dim;
-  const uint16_t pool_out_dim = gemmini_state.loop_conv_ws_pool_out_dim;
+  const uint16_t out_col_dim = gemmini_state.loop_conv_ws_out_col_dim;
+  const uint16_t pool_out_col_dim = gemmini_state.loop_conv_ws_pool_out_col_dim;
+  const uint16_t out_row_dim = gemmini_state.loop_conv_ws_out_row_dim;
+  const uint16_t pool_out_row_dim = gemmini_state.loop_conv_ws_pool_out_row_dim;
   const uint16_t stride = gemmini_state.loop_conv_ws_stride;
   const uint16_t padding = gemmini_state.loop_conv_ws_padding;
   const uint16_t kernel_dim = gemmini_state.loop_conv_ws_kernel_dim;
@@ -1226,11 +1229,11 @@ void gemmini_t::loop_conv_ws(reg_t rs1, reg_t rs2) {
 
             const bool is_zeros = irow < 0 || irow >= irows_unpadded || icol < 0 || icol >= icols_unpadded;
 
-            uint64_t in = input + ((b*in_dim*in_dim + irow*in_dim + icol) * in_stride + ich) * sizeof(elem_t);
+            uint64_t in = input + ((b*in_row_dim*in_col_dim + irow*in_col_dim + icol) * in_stride + ich) * sizeof(elem_t);
             if (is_zeros) {
               in = 0;
             } else if (trans_input_3120) {
-              in = input + ((ich*in_dim*in_dim + irow*in_dim + icol) * batch_size + b) * sizeof(elem_t);
+              in = input + ((ich*in_row_dim*in_col_dim + irow*in_col_dim + icol) * batch_size + b) * sizeof(elem_t);
             }
 
             // gemmini_extended_mvin(in,
@@ -1433,9 +1436,9 @@ void gemmini_t::loop_conv_ws(reg_t rs1, reg_t rs2) {
 
             const uint32_t C_sp_addr = C_sp_addr_start + (och / DIM) * batches * orows * ocols + b * orows * ocols + orow * ocols + ocol;
 
-            auto out = output + ((b*out_dim*out_dim + orow*out_dim + ocol) * out_stride + och) * sizeof(elem_t);
+            auto out = output + ((b*out_row_dim*out_col_dim + orow*out_col_dim + ocol) * out_stride + och) * sizeof(elem_t);
             if (trans_output_1203) {
-              out = output + ((orow*out_dim*batch_size + ocol*batch_size + b) * out_channels + och) * sizeof(elem_t);
+              out = output + ((orow*out_col_dim*batch_size + ocol*batch_size + b) * out_channels + och) * sizeof(elem_t);
             }
 
             mvout(out,
@@ -1451,7 +1454,7 @@ void gemmini_t::loop_conv_ws(reg_t rs1, reg_t rs2) {
       ((uint64_t)orows << 48) |
       ((uint64_t)pocols << 40) |
       ((uint64_t)porows << 32) |
-      ((uint64_t)pool_out_dim << 24) |
+      ((uint64_t)pool_out_col_dim << 24) |
       ((uint64_t)plpad << 10) |
       ((uint64_t)pupad << 8) |
       ((uint64_t)pool_size << 6) |
@@ -1467,7 +1470,7 @@ void gemmini_t::loop_conv_ws(reg_t rs1, reg_t rs2) {
 
         const uint32_t C_sp_addr = C_sp_addr_start + (poch / DIM) * batches * orows * ocols + b * orows * ocols;
 
-        mvout(output + ((b * pool_out_dim * pool_out_dim)*out_stride + poch) * sizeof(elem_t),
+        mvout(output + ((b * pool_out_row_dim * pool_out_col_dim)*out_stride + poch) * sizeof(elem_t),
           ((uint64_t)channels << 32) | C_sp_addr);
       }
     }
@@ -1477,27 +1480,29 @@ void gemmini_t::loop_conv_ws(reg_t rs1, reg_t rs2) {
       (activation << 2) |
       2,
       ((uint64_t)(acc_scale_t_to_acc_scale_t_bits(acc_scale)) << 32) |
-      out_channels * sizeof(elem_t));
+      out_stride * sizeof(elem_t));
   }
 }
 
 void gemmini_t::loop_conv_ws_config_1(reg_t rs1, reg_t rs2) {
   gemmini_state.loop_conv_ws_batch_size = rs1 & 0xFFFF;
-  gemmini_state.loop_conv_ws_in_dim = (rs1 >> 16) & 0xFFFF;
+  gemmini_state.loop_conv_ws_in_row_dim = (rs1 >> 16) & 0xFFFF;
   gemmini_state.loop_conv_ws_in_channels = (rs1 >> 32) & 0xFFFF;
   gemmini_state.loop_conv_ws_out_channels = (rs1 >> 48) & 0xFFFF;
 
-  gemmini_state.loop_conv_ws_out_dim = rs2 & 0xFFFF;
-  gemmini_state.loop_conv_ws_pool_out_dim = (rs2 >> 16) & 0xFFFF;
-  gemmini_state.loop_conv_ws_stride = (rs2 >> 32) & 0xFFFF;
-  gemmini_state.loop_conv_ws_padding = (rs2 >> 48) & 0xFFFF;
+  gemmini_state.loop_conv_ws_out_row_dim = rs2 & 0xFFFF;
+  gemmini_state.loop_conv_ws_pool_out_row_dim = (rs2 >> 16) & 0xFFFF;
+  gemmini_state.loop_conv_ws_out_col_dim = (rs2 >> 32) & 0xFFFF;
+  gemmini_state.loop_conv_ws_stride = (rs2 >> 48) & 0xFF;
+  gemmini_state.loop_conv_ws_padding = (rs2 >> 56) & 0xFF;
 }
 
 void gemmini_t::loop_conv_ws_config_2(reg_t rs1, reg_t rs2) {
   gemmini_state.loop_conv_ws_kernel_dim = (rs1 >> 48) & 0xFFFF;
-  gemmini_state.loop_conv_ws_pool_size = (rs1 >> 32) & 0xFFFF;
-  gemmini_state.loop_conv_ws_pool_stride = (rs1 >> 16) & 0xFFFF;
-  gemmini_state.loop_conv_ws_pool_padding = rs1 & 0xFFFF;
+  gemmini_state.loop_conv_ws_pool_out_col_dim = (rs1 >> 32) & 0xFFFF;
+  gemmini_state.loop_conv_ws_pool_size = (rs1 >> 16) & 0xFFFF;
+  gemmini_state.loop_conv_ws_pool_stride = (rs1 >> 8) & 0xFF;
+  gemmini_state.loop_conv_ws_pool_padding = rs1 & 0xFF;
 
   gemmini_state.loop_conv_ws_batches = (rs2 >> 48) & 0xFFFF;
   gemmini_state.loop_conv_ws_porows = (rs2 >> 32) & 0xFFFF;
@@ -1513,8 +1518,9 @@ void gemmini_t::loop_conv_ws_config_3(reg_t rs1, reg_t rs2) {
 
   gemmini_state.loop_conv_ws_rpad = (rs2 >> 48) & 0xFFFF;
   gemmini_state.loop_conv_ws_upad = (rs2 >> 32) & 0xFFFF;
-  gemmini_state.loop_conv_ws_dpad = (rs2 >> 16) & 0xFFFF;
-  gemmini_state.loop_conv_ws_plpad = rs2 & 0xFFFF;
+  gemmini_state.loop_conv_ws_dpad = (rs2 >> 24) & 0xFF;
+  gemmini_state.loop_conv_ws_plpad = (rs2 >> 16) & 0xFF;
+  gemmini_state.loop_conv_ws_in_col_dim = rs2 & 0xFFFF;
 }
 
 void gemmini_t::loop_conv_ws_config_4(reg_t rs1, reg_t rs2) {

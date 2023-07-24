@@ -69,9 +69,9 @@ struct gemmini_state_t
   uint16_t loop_ws_pad_I, loop_ws_pad_J, loop_ws_pad_K;
   uint64_t loop_ws_A, loop_ws_B, loop_ws_D, loop_ws_C;
   uint64_t loop_ws_A_stride, loop_ws_B_stride, loop_ws_D_stride, loop_ws_C_stride;
-  uint16_t loop_conv_ws_batch_size, loop_conv_ws_in_dim, loop_conv_ws_in_channels, loop_conv_ws_out_channels;
+  uint16_t loop_conv_ws_batch_size, loop_conv_ws_in_row_dim, loop_conv_ws_in_col_dim, loop_conv_ws_in_channels, loop_conv_ws_out_channels;
   uint16_t loop_conv_ws_in_stride, loop_conv_ws_weight_stride, loop_conv_ws_out_stride;
-  uint16_t loop_conv_ws_out_dim, loop_conv_ws_pool_out_dim, loop_conv_ws_stride, loop_conv_ws_padding;
+  uint16_t loop_conv_ws_out_row_dim, loop_conv_ws_pool_out_row_dim, loop_conv_ws_out_col_dim, loop_conv_ws_pool_out_col_dim, loop_conv_ws_stride, loop_conv_ws_padding;
   uint16_t loop_conv_ws_kernel_dim, loop_conv_ws_pool_size, loop_conv_ws_pool_stride, loop_conv_ws_pool_padding;
   uint16_t loop_conv_ws_batches, loop_conv_ws_porows, loop_conv_ws_pocols, loop_conv_ws_pochs;
   uint16_t loop_conv_ws_krows, loop_conv_ws_kcols, loop_conv_ws_kchs, loop_conv_ws_lpad;
