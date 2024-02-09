@@ -124,6 +124,7 @@ public:
 
   void mvin(reg_t dram_addr, reg_t sp_addr, int state_id);
   void mvout(reg_t dram_addr, reg_t sp_addr);
+  void mvout_spad(reg_t sp_addr_dst, reg_t sp_addr);
   void preload(reg_t bd_addr, reg_t c_addr);
   void config(reg_t rs1, reg_t rs2);
   void compute(reg_t a_addr, reg_t bd_addr, bool preload);
@@ -158,6 +159,7 @@ private:
   const unsigned mvin2_funct = 1;
   const unsigned mvin3_funct = 14;
   const unsigned mvout_funct = 3;
+  const unsigned mvout_spad_funct = 23;
   const unsigned compute_preloaded_funct = 4;
   const unsigned compute_accumulated_funct = 5;
   const unsigned preload_funct = 6;

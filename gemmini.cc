@@ -357,6 +357,99 @@ void gemmini_t::mvout(reg_t dram_addr, reg_t sp_addr) {
   }
 }
 
+void gemmini_t::mvout_spad(reg_t sp_addr_dst, reg_t sp_addr) {
+  bool const accumulator = (sp_addr >> 31) & 0x1;
+  bool const full = (sp_addr >> 29) & 0x1;
+  auto const norm_cmd = static_cast<gemmini_state_t::NormCmd>((sp_addr >> 26) & 0x7);
+  auto const base_row_addr = (sp_addr & 0x3FFFFFF); // Strip accumulator addressing bits [31:26]
+  auto const base_row_addr_dst = (sp_addr_dst & 0x3FFFFFF); // Strip accumulator addressing bits [31:26]
+
+  auto const cols = (sp_addr >> addr_len) & 0xFFFF;
+  auto const rows = (sp_addr >> (addr_len + 16)) & 0xFFFF;
+
+  const int block_stride = DIM;
+
+  dprintf("GEMMINI: mvout_spad - 0x%02lx cols and 0x%02lx rows from 0x%08lx to addr 0x%08lx\n", cols, rows, sp_addr, sp_addr_dst);
+
+  if (gemmini_state.pool_stride == 0) {
+    for (size_t i = 0; i < rows; ++i) {
+      // auto const dram_row_addr = dram_addr + i*gemmini_state.store_stride;
+
+      bool should_write = true;
+
+      for (size_t j = 0; j < cols; j += DIM) {
+        const size_t block = j / DIM;
+        const size_t spad_row = base_row_addr + block*block_stride + i;
+        const size_t len = cols - j > DIM ? DIM : cols - j;
+
+        const bool is_last = j + DIM >= cols;
+        const auto n_cmd = is_last ? norm_cmd : non_terminating_norm_cmd(norm_cmd);
+
+        should_write = apply_norm(
+            &gemmini_state.accumulator.at(spad_row).at(0),
+            len, n_cmd);
+      }
+
+      if (!should_write)
+        continue;
+
+      for (size_t j = 0; j < cols; ++j) {
+        const size_t block = j / DIM;
+        const size_t spad_col = j % DIM;
+        const size_t spad_row = base_row_addr + block*block_stride + i;
+        const size_t spad_row_dst = base_row_addr_dst + block*block_stride + i;
+        
+
+        if (accumulator) { // Apply shift and activation when moving out of accumulator
+          acc_t acc_value = gemmini_state.accumulator.at(spad_row).at(spad_col);
+          acc_value = apply_pre_activation_acc(acc_value);
+
+          auto shifted = acc_scale(acc_value, gemmini_state.acc_shift);
+          elem_t activated = apply_activation_acc(shifted); // Activation is always applied in either WS/OS mode
+
+          auto const sizeof_output = full ? sizeof(acc_t) : sizeof(elem_t);
+#ifdef ELEM_T_IS_FLOAT
+          if (full) {
+            // write_to_dram<acc_t_bits>(dram_byte_addr, acc_t_to_acc_t_bits(acc_value));
+            // dprintf("%f ", acc_value);
+            dprintf("GEMMINI: mvout_spad - accumulator full precision not supported\n");
+          } else {
+            gemmini_state.spad.at(spad_row_dst).at(spad_col) = activated;
+            dprintf("%f ", activated);
+          }
+#else
+          if (full) {
+            // write_to_dram<acc_t>(dram_byte_addr, acc_value);
+            // dprintf("%d ", acc_value);
+            dprintf("GEMMINI: mvout_spad - accumulator full precision not supported\n");
+          } else {
+            // write_to_dram<elem_t>(dram_byte_addr, activated);
+            gemmini_state.spad.at(spad_row_dst).at(spad_col) = activated;
+            dprintf("%d ", activated);
+            printf290("%d ", activated);
+          }
+#endif
+
+        } else { // Scratchpad, write to DRAM directly
+          // auto const dram_byte_addr = dram_row_addr + j*sizeof(elem_t);
+          elem_t value = gemmini_state.spad.at(spad_row).at(spad_col);
+          gemmini_state.spad.at(spad_row_dst).at(spad_col) = value;
+
+#ifdef ELEM_T_IS_FLOAT
+          dprintf("%f ", value);
+#else
+          dprintf("%d ", value);
+#endif
+        }
+      }
+      dprintf("\n");
+    }
+
+  } else {
+    dprintf("GEMMINI: mvout_spad - pooling not supported\n");
+  }
+}
+
 void gemmini_t::preload(reg_t bd_addr, reg_t c_addr) {
   // TODO: rename these state variables
   gemmini_state.preload_sp_addr = static_cast<uint32_t>(bd_addr & 0xFFFFFFFF);
@@ -1510,6 +1603,8 @@ reg_t gemmini_t::CUSTOMFN(XCUSTOM_ACC)(rocc_insn_t insn, reg_t xs1, reg_t xs2) {
     mvin(xs1, xs2, 2);
   } else if (insn.funct == mvout_funct) {
     mvout(xs1, xs2);
+  }else if (insn.funct == mvout_spad_funct) {
+    mvout_spad(xs1, xs2);
   } else if (insn.funct == preload_funct) {
     preload(xs1, xs2);
   } else if (insn.funct == config_funct) {
