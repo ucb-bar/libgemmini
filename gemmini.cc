@@ -10,6 +10,7 @@ using namespace std;
 
 REGISTER_EXTENSION(gemmini, []() { return new gemmini_t; })
 
+//#define dprintf(...) {  printf(__VA_ARGS__); }
 #define dprintf(...) { if (p->get_log_commits_enabled()) printf(__VA_ARGS__); }
 
 void gemmini_state_t::reset()
@@ -703,6 +704,7 @@ void gemmini_t::loop_ws(reg_t rs1, reg_t rs2) {
   if(a_spad_id == 2) A_sp_addr_start = (BANK_NUM * BANK_ROWS) / 2;
   if(b_spad_id == 2) B_sp_addr_start = (BANK_NUM * BANK_ROWS) - K * J * DIM;
   if(is_resadd) {
+    dprintf("configured as resadd operation\n");
     A_sp_addr_start = 1 << (ADDR_LEN - 1);
     B_sp_addr_start = 3 << (ADDR_LEN - 2);
     for(uint16_t i = 0; i < I; i++){
@@ -714,12 +716,14 @@ void gemmini_t::loop_ws(reg_t rs1, reg_t rs2) {
         dram_addr = gemmini_state.loop_ws_A + (i*gemmini_state.loop_ws_A_stride + j) * DIM * sizeof(elem_t);
         cols = DIM - (j == J-1 ? pad_J : 0);
         rows = DIM - (i == I-1 ? pad_I : 0);
-        mvin(dram_addr, (rows << 48) | (cols << 32) | A_sp_addr, 0);
+        if(gemmini_state.loop_ws_A != 0)
+            mvin(dram_addr, (rows << 48) | (cols << 32) | A_sp_addr, 0);
 
         dram_addr = gemmini_state.loop_ws_B + (i*gemmini_state.loop_ws_B_stride + j) * DIM * sizeof(elem_t);
         cols = DIM - (j == J-1 ? pad_J : 0);
         rows = DIM - (i == I-1 ? pad_I : 0);
-        mvin(dram_addr, (rows << 48) | (cols << 32) | B_sp_addr, 1);
+        if(gemmini_state.loop_ws_B != 0)
+            mvin(dram_addr, (rows << 48) | (cols << 32) | B_sp_addr, 1);
         if(gemmini_state.loop_ws_C != 0){
           const size_t sizeof_C = full_C ? sizeof(acc_t) : sizeof(elem_t);
           const uint64_t C_dram_addr = gemmini_state.loop_ws_C +
