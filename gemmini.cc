@@ -522,6 +522,8 @@ void gemmini_t::compute(reg_t a_addr, reg_t bd_addr, bool preload) {
   auto a_addr_real = static_cast<uint32_t>(a_addr & 0xFFFFFFFF);
   auto bd_addr_real = static_cast<uint32_t>(bd_addr & 0xFFFFFFFF);
 
+  const uint8_t gemv = a_addr >> 48; // TODO Do not hardcode this
+
   const uint16_t a_cols = (a_addr >> addr_len) & 0xFFFF;
   const uint16_t a_rows = (a_addr >> (addr_len + 16)) & 0xFFFF;
 
@@ -587,8 +589,11 @@ void gemmini_t::compute(reg_t a_addr, reg_t bd_addr, bool preload) {
         if (~a_addr_real != 0) {
             const size_t r = gemmini_state.a_stride * (gemmini_state.a_transpose ? k : i);
             const size_t c = gemmini_state.a_transpose ? i : k;
-
-            a = i < a_rows && k < a_cols ? gemmini_state.spad.at(a_addr_real + r).at(c) : 0;
+            if(gemv) {
+              a = i < a_rows && k < a_cols ? gemmini_state.spad.at(BANK_ROWS * j + a_addr_real + r).at(c) : 0;
+            } else {
+              a = i < a_rows && k < a_cols ? gemmini_state.spad.at(a_addr_real + r).at(c) : 0;
+            }
         }
 
         if (gemmini_state.mode == gemmini_state_t::WS) {
@@ -601,7 +606,9 @@ void gemmini_t::compute(reg_t a_addr, reg_t bd_addr, bool preload) {
           if (~bd_addr_real != 0) {
             const size_t r = gemmini_state.b_transpose ? j : k;
             const size_t c = gemmini_state.b_transpose ? k : j;
-
+          if(gemv) {
+            b = k < bd_rows && j < bd_cols ? gemmini_state.spad.at(bd_addr_real + r).at(0) : 0;
+          } else {
             b = k < bd_rows && j < bd_cols ? gemmini_state.spad.at(bd_addr_real + r).at(c) : 0;
           }
 
@@ -624,6 +631,7 @@ void gemmini_t::compute(reg_t a_addr, reg_t bd_addr, bool preload) {
   }
 
   // Write results
+  // TODO write to same row GEMV
   if (~gemmini_state.output_sp_addr != 0) {
     bool const acc = (gemmini_state.output_sp_addr >> 31) & 0x1;
     bool const acc_accum = (gemmini_state.output_sp_addr >> 30) & 0x1;
@@ -665,6 +673,7 @@ void gemmini_t::compute(reg_t a_addr, reg_t bd_addr, bool preload) {
       dprintf("\n");
     }
   }
+}
 }
 
 void gemmini_t::loop_ws(reg_t rs1, reg_t rs2) {
