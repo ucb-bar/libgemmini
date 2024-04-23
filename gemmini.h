@@ -27,6 +27,7 @@ static const uint64_t addr_len = ADDR_LEN; // Number of bits used to address the
 struct gemmini_state_t
 {
   enum Dataflow {OS, WS};
+  enum MeshOp {GEMM, GEMV};
   enum Activation {NONE, RELU, LAYERNORM, IGELU, SOFTMAX};
   enum NormCmd {RESET, SUM, MEAN, VARIANCE, INV_STDDEV, MAX, SUM_EXP, INV_SUM_EXP};
   void reset();
@@ -37,6 +38,7 @@ struct gemmini_state_t
   uint16_t preload_cols, preload_rows;
   uint16_t output_cols, output_rows;
   Dataflow mode;
+  MeshOp mesh_op;
   Activation sys_act;
   Activation acc_act;
   reg_t sys_shift;

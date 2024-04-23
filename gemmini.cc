@@ -375,6 +375,7 @@ void gemmini_t::config(reg_t rs1, reg_t rs2) {
   if ((rs1 & 0b11) == 0) { // rs1[1:0] == 2'b00, config_ex, configure execute pipeline
     gemmini_state_t::Dataflow new_mode;
     gemmini_state_t::Activation new_act;
+    gemmini_state_t::MeshOp new_mesh_op;
     reg_t new_sys_shift, new_sys_acc_shift, new_c_stride, new_a_stride, new_a_transpose, new_b_transpose;
 
     auto rs1_2 = (rs1 >> 2) & 0b1; // extract rs1[2], 0 = output stationary, 1 = weight stationary
@@ -382,6 +383,13 @@ void gemmini_t::config(reg_t rs1, reg_t rs2) {
       new_mode = gemmini_state_t::OS;
     } else {
       new_mode = gemmini_state_t::WS;
+    }
+
+    auto rs1_6 = (rs1 >> 6) & 0b1; // extract rs1[6], 0 = gemm mode, 1 = gemv mode
+    if (rs1_6 == 0) {
+      new_mesh_op = gemmini_state_t::GEMM;
+    } else {
+      new_mesh_op = gemmini_state_t::GEMV;
     }
 
     auto rs1_4_3 = (rs1 >> 3) & 0b11; // extract rs1[4:3], 0 = no activation, 1 = ReLU, 2 = ReLU6
@@ -424,6 +432,7 @@ void gemmini_t::config(reg_t rs1, reg_t rs2) {
       gemmini_state.sys_acc_shift = new_sys_acc_shift;
       gemmini_state.a_transpose = new_a_transpose;
       gemmini_state.b_transpose = new_b_transpose;
+      gemmini_state.mesh_op = new_mesh_op;
     }
 
     gemmini_state.c_stride = new_c_stride;
@@ -522,8 +531,6 @@ void gemmini_t::compute(reg_t a_addr, reg_t bd_addr, bool preload) {
   auto a_addr_real = static_cast<uint32_t>(a_addr & 0xFFFFFFFF);
   auto bd_addr_real = static_cast<uint32_t>(bd_addr & 0xFFFFFFFF);
 
-  const uint8_t gemv = a_addr >> 48; // TODO Do not hardcode this
-
   const uint16_t a_cols = (a_addr >> addr_len) & 0xFFFF;
   const uint16_t a_rows = (a_addr >> (addr_len + 16)) & 0xFFFF;
 
@@ -589,7 +596,7 @@ void gemmini_t::compute(reg_t a_addr, reg_t bd_addr, bool preload) {
         if (~a_addr_real != 0) {
             const size_t r = gemmini_state.a_stride * (gemmini_state.a_transpose ? k : i);
             const size_t c = gemmini_state.a_transpose ? i : k;
-            if(gemv) {
+            if(gemmini_state.mesh_op == gemmini_state_t::GEMV) {
               a = i < a_rows && k < a_cols ? gemmini_state.spad.at(BANK_ROWS * j + a_addr_real + r).at(c) : 0;
             } else {
               a = i < a_rows && k < a_cols ? gemmini_state.spad.at(a_addr_real + r).at(c) : 0;
@@ -606,7 +613,7 @@ void gemmini_t::compute(reg_t a_addr, reg_t bd_addr, bool preload) {
           if (~bd_addr_real != 0) {
             const size_t r = gemmini_state.b_transpose ? j : k;
             const size_t c = gemmini_state.b_transpose ? k : j;
-          if(gemv) {
+          if(gemmini_state.mesh_op == gemmini_state_t::GEMV) {
             b = k < bd_rows && j < bd_cols ? gemmini_state.spad.at(bd_addr_real + r).at(0) : 0;
           } else {
             b = k < bd_rows && j < bd_cols ? gemmini_state.spad.at(bd_addr_real + r).at(c) : 0;
