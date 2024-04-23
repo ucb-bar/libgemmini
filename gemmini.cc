@@ -208,7 +208,7 @@ void gemmini_t::mvin(reg_t dram_addr, reg_t sp_addr, int state_id) {
 #ifdef ELEM_T_IS_FLOAT
             dprintf("%f ", gemmini_state.spad.at(spad_row).at(spad_col));
 #else
-            dprintf("%d", gemmini_state.spad.at(spad_row).at(spad_col));
+            dprintf("%d ", gemmini_state.spad.at(spad_row).at(spad_col));
 #endif
         }
       }
