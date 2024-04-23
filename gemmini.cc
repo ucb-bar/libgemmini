@@ -558,9 +558,15 @@ void gemmini_t::compute(reg_t a_addr, reg_t bd_addr, bool preload) {
         // In OS mode, pe_state stores the accumulator values
         // In WS mode, pe_state stores the persistent weight matrix
         if (i < gemmini_state.preload_rows && j < gemmini_state.preload_cols) {
-          auto preload_value = (~gemmini_state.preload_sp_addr == 0) ? 0 :
-                  gemmini_state.spad.at(gemmini_state.preload_sp_addr + r).at(c);
-          gemmini_state.pe_state.at(i).at(j) = preload_value;
+          if(gemmini_state.mesh_op == gemmini_state_t::GEMV) {
+            auto preload_value = (~gemmini_state.preload_sp_addr == 0) ? 0 :
+                    gemmini_state.spad.at(gemmini_state.preload_sp_addr + r).at(0);
+            gemmini_state.pe_state.at(i).at(j) = preload_value;
+          } else {
+            auto preload_value = (~gemmini_state.preload_sp_addr == 0) ? 0 :
+                    gemmini_state.spad.at(gemmini_state.preload_sp_addr + r).at(c);
+            gemmini_state.pe_state.at(i).at(j) = preload_value;
+          }
         } else {
           gemmini_state.pe_state.at(i).at(j) = 0;
         }
@@ -643,7 +649,11 @@ void gemmini_t::compute(reg_t a_addr, reg_t bd_addr, bool preload) {
     bool const acc = (gemmini_state.output_sp_addr >> 31) & 0x1;
     bool const acc_accum = (gemmini_state.output_sp_addr >> 30) & 0x1;
     auto const base_sp_addr = gemmini_state.output_sp_addr & 0x1FFFFFFF;
-    dprintf("GEMMINI: compute - writing results to addr 0x%08x, :\n", gemmini_state.output_sp_addr);
+    if (gemmini_state.mesh_op == gemmini_state_t::GEMV) {
+      dprintf("GEMMINI: compute (gemv) - writing results to addr 0x%08x, :\n", gemmini_state.output_sp_addr);
+    } else {
+      dprintf("GEMMINI: compute - writing results to addr 0x%08x, :\n", gemmini_state.output_sp_addr);
+    }
 
     for (size_t i = 0; i < gemmini_state.output_rows; ++i) {
       for (size_t j = 0; j < gemmini_state.output_cols; ++j) {
