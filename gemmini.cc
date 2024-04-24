@@ -596,6 +596,7 @@ void gemmini_t::compute(reg_t a_addr, reg_t bd_addr, bool preload) {
   }
 
   for (size_t i = 0; i < DIM; ++i) {
+    dprintf("GEMMINI: compute - A values during matmul:\n");
     for (size_t j = 0; j < DIM; ++j) {
       for (size_t k = 0; k < DIM; ++k) {
         elem_t a;
@@ -608,11 +609,17 @@ void gemmini_t::compute(reg_t a_addr, reg_t bd_addr, bool preload) {
               a = i < a_rows && k < a_cols ? gemmini_state.spad.at(a_addr_real + r).at(c) : 0;
             }
         }
+#ifdef ELEM_T_IS_FLOAT
+        dprintf("%f ", a);
+#else
+        dprintf("%d ", a);
+#endif
 
         if (gemmini_state.mode == gemmini_state_t::WS) {
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
           results.at(i).at(j) += a * gemmini_state.pe_state.at(k).at(j);
+          dprintf("Updated results[%d][%d] to %d\n", i, j, results.at(i).at(j));
 #pragma GCC diagnostic pop
         } else {
           elem_t b = 0;
@@ -624,11 +631,13 @@ void gemmini_t::compute(reg_t a_addr, reg_t bd_addr, bool preload) {
           } else {
             b = k < bd_rows && j < bd_cols ? gemmini_state.spad.at(bd_addr_real + r).at(c) : 0;
           }
+          }
 
           gemmini_state.pe_state.at(i).at(j) += a * b;
         }
       }
     }
+    dprintf("\n");
   }
 
   dprintf("GEMMINI: compute - PEs after matmul:\n");
@@ -644,7 +653,6 @@ void gemmini_t::compute(reg_t a_addr, reg_t bd_addr, bool preload) {
   }
 
   // Write results
-  // TODO write to same row GEMV
   if (~gemmini_state.output_sp_addr != 0) {
     bool const acc = (gemmini_state.output_sp_addr >> 31) & 0x1;
     bool const acc_accum = (gemmini_state.output_sp_addr >> 30) & 0x1;
@@ -690,7 +698,6 @@ void gemmini_t::compute(reg_t a_addr, reg_t bd_addr, bool preload) {
       dprintf("\n");
     }
   }
-}
 }
 
 void gemmini_t::loop_ws(reg_t rs1, reg_t rs2) {
