@@ -241,10 +241,12 @@ void gemmini_t::mvout(reg_t dram_addr, reg_t sp_addr) {
 
         const bool is_last = j + DIM >= cols;
         const auto n_cmd = is_last ? norm_cmd : non_terminating_norm_cmd(norm_cmd);
-
-        should_write = apply_norm(
-            &gemmini_state.accumulator.at(spad_row).at(0),
-            len, n_cmd);
+	
+	if(accumulator) {
+          should_write = apply_norm(
+              &gemmini_state.accumulator.at(spad_row).at(0),
+              len, n_cmd);
+	}
       }
 
       if (!should_write)
