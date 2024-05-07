@@ -560,7 +560,7 @@ void gemmini_t::compute(reg_t a_addr, reg_t bd_addr, bool preload) {
         if (i < gemmini_state.preload_rows && j < gemmini_state.preload_cols) {
           if(gemmini_state.mesh_op == gemmini_state_t::GEMV) {
             auto preload_value = (~gemmini_state.preload_sp_addr == 0) ? 0 :
-                    gemmini_state.spad.at(gemmini_state.preload_sp_addr + r).at(0);
+            gemmini_state.spad.at(gemmini_state.preload_sp_addr + 0).at(i);
             gemmini_state.pe_state.at(i).at(j) = preload_value;
           } else {
             auto preload_value = (~gemmini_state.preload_sp_addr == 0) ? 0 :
