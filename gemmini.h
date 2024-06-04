@@ -235,7 +235,10 @@ private:
 #if defined(HAS_MVIN_SCALE) || defined(HAS_MVIN_ACC_SCALE)
   scale_t_bits scale_t_to_scale_t_bits(scale_t scale);
   scale_t scale_t_bits_to_scale_t(scale_t_bits bits);
+#else 
+#define scale_t_to_scale_t_bits(x) 0 
 #endif
+
 
   acc_scale_t_bits acc_scale_t_to_acc_scale_t_bits(acc_scale_t scale);
   acc_scale_t acc_scale_t_bits_to_acc_scale_t(acc_scale_t_bits bits);
