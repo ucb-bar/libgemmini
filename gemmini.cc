@@ -1300,7 +1300,7 @@ void gemmini_t::loop_conv_ws(reg_t rs1, reg_t rs2) {
 
             auto w = weights + ((krow*kernel_dim*in_channels + kcol*in_channels + kch) * weight_stride + och)*sizeof(elem_t);
             if (dw) {
-              w = (weights + krow * kernel_dim + kcol)*sizeof(elem_t);
+              w = weights + (krow * kernel_dim + kcol)*sizeof(elem_t);
             } else if (trans_weight_1203) {
               w = weights + ((kch * kernel_dim * kernel_dim  + krow * kernel_dim + kcol) * out_channels + och)*sizeof(elem_t);
             } else if (trans_weight_0132) {
