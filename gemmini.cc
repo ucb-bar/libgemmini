@@ -134,6 +134,7 @@ void gemmini_t::mvin(reg_t dram_addr, reg_t sp_addr, int state_id) {
   auto const pixels_per_row = gemmini_state.pixels_per_rows[state_id];
 
   dprintf("GEMMINI: mvin - 0x%02lx cols and 0x%02lx rows from 0x%08lx to addr 0x%08lx\n", cols, rows, dram_addr, sp_addr & 0xFFFFFFFF);
+  printf("GEMMINI: mvin - 0x%02lx cols and 0x%02lx rows from 0x%08lx to addr 0x%08lx\n", cols, rows, dram_addr, sp_addr & 0xFFFFFFFF);
 
   for (size_t row = 0; row < rows; ++row) {
     auto const dram_row_addr = dram_addr + row*load_stride;
@@ -228,6 +229,7 @@ void gemmini_t::mvout(reg_t dram_addr, reg_t sp_addr) {
   const int block_stride = DIM;
 
   dprintf("GEMMINI: mvout - 0x%02lx cols and 0x%02lx rows from 0x%08lx to addr 0x%08lx\n", cols, rows, sp_addr, dram_addr);
+  printf("GEMMINI: mvout - 0x%02lx cols and 0x%02lx rows from 0x%08lx to addr 0x%08lx\n", cols, rows, sp_addr, dram_addr);
 
   if (gemmini_state.pool_stride == 0) {
     for (size_t i = 0; i < rows; ++i) {
