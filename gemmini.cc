@@ -1637,7 +1637,7 @@ reg_t gemmini_t::CUSTOMFN(XCUSTOM_ACC)(rocc_insn_t insn, reg_t xs1, reg_t xs2) {
     dprintf("GEMMINI: fence\n");
   } else {
     dprintf("GEMMINI: encountered unknown instruction with funct: %d\n", insn.funct);
-    illegal_instruction();
+    illegal_instruction(*p);
   }
   gemmini_state.op_in_progress = (insn.funct != flush_funct);
   return 0;
@@ -1934,14 +1934,14 @@ void gemmini_t::counter_increment_random() {
 
 define_custom_func(gemmini_t, "gemmini", gemmini_custom3, custom3)
 
-std::vector<insn_desc_t> gemmini_t::get_instructions()
+std::vector<insn_desc_t> gemmini_t::get_instructions(const processor_t &p)
 {
   std::vector<insn_desc_t> insns;
   push_custom_insn(insns, ROCC_OPCODE3, ROCC_OPCODE_MASK, ILLEGAL_INSN_FUNC, gemmini_custom3);
   return insns;
 }
 
-std::vector<disasm_insn_t*> gemmini_t::get_disasms()
+std::vector<disasm_insn_t*> gemmini_t::get_disasms(const processor_t *p)
 {
   std::vector<disasm_insn_t*> insns;
   return insns;
