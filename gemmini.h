@@ -118,11 +118,10 @@ class gemmini_t : public extension_t
 public:
   gemmini_t() : cause(0), aux(0), debug(false) {}
   const char* name() const override { return "gemmini"; }
-  void reset(processor_t &p) { this->p = &p; }
-  
 
-  reg_t CUSTOMFN(XCUSTOM_ACC)( rocc_insn_t insn, reg_t xs1, reg_t xs2);
+  reg_t CUSTOMFN(XCUSTOM_ACC)(rocc_insn_t insn, reg_t xs1, reg_t xs2);
   void reset();
+  void set_processor(processor_t* p) { this->p = p; }
 
   void mvin(reg_t dram_addr, reg_t sp_addr, int state_id);
   void mvout(reg_t dram_addr, reg_t sp_addr);
