@@ -735,7 +735,7 @@ void gemmini_t::loop_ws(reg_t rs1, reg_t rs2) {
     }
     return;
   }
-  
+
   if (gemmini_state.loop_ws_D != 0) {
     for (uint16_t i = 0; i < I; i++) {
       for (uint16_t j = 0; j < J; j++) {
@@ -1042,7 +1042,7 @@ void gemmini_t::loop_conv_ws(reg_t rs1, reg_t rs2) {
   const bool activation = (rs2 >> 3) & 3;
   uint8_t a_spad_id = (rs1 >> 18) & 0b11;
   uint8_t b_spad_id = (rs1 >> 16) & 0b11;
-  
+
   if (max_pixels_per_row == 0)
     max_pixels_per_row = 1;
 
@@ -1639,7 +1639,7 @@ reg_t gemmini_t::CUSTOMFN(XCUSTOM_ACC)(rocc_insn_t insn, reg_t xs1, reg_t xs2) {
     dprintf("GEMMINI: fence\n");
   } else {
     dprintf("GEMMINI: encountered unknown instruction with funct: %d\n", insn.funct);
-    illegal_instruction();
+    illegal_instruction(*p);
   }
   gemmini_state.op_in_progress = (insn.funct != flush_funct);
   return 0;
@@ -1934,16 +1934,30 @@ void gemmini_t::counter_increment_random() {
   }
 }
 
-define_custom_func(gemmini_t, "gemmini", gemmini_custom3, custom3)
+static reg_t gemmini_custom(processor_t* p, insn_t insn, reg_t pc) {
+  gemmini_t* gemmini = static_cast<gemmini_t*>(p->get_extension("gemmini"));
+  rocc_insn_union_t u;
+  state_t* state = p->get_state();
+  gemmini->set_processor(p);
+  u.i = insn;
+  reg_t xs1 = u.r.xs1 ? state->XPR[insn.rs1()] : -1;
+  reg_t xs2 = u.r.xs2 ? state->XPR[insn.rs2()] : -1;
+  reg_t xd = gemmini->CUSTOMFN(XCUSTOM_ACC)(u.r, xs1, xs2);
+  if (u.r.xd) {
+    state->log_reg_write[insn.rd() << 4] = {xd, 0};
+    state->XPR.write(insn.rd(), xd);
+  }
+  return pc+4;
+}
 
-std::vector<insn_desc_t> gemmini_t::get_instructions()
+std::vector<insn_desc_t> gemmini_t::get_instructions(const processor_t &p)
 {
   std::vector<insn_desc_t> insns;
-  push_custom_insn(insns, ROCC_OPCODE3, ROCC_OPCODE_MASK, ILLEGAL_INSN_FUNC, gemmini_custom3);
+  push_custom_insn(insns, ROCC_OPCODE3, ROCC_OPCODE_MASK, ILLEGAL_INSN_FUNC, gemmini_custom);
   return insns;
 }
 
-std::vector<disasm_insn_t*> gemmini_t::get_disasms()
+std::vector<disasm_insn_t*> gemmini_t::get_disasms(const processor_t *p)
 {
   std::vector<disasm_insn_t*> insns;
   return insns;

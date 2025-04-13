@@ -117,11 +117,11 @@ class gemmini_t : public extension_t
 {
 public:
   gemmini_t() : cause(0), aux(0), debug(false) {}
-  const char* name() { return "gemmini"; }
+  const char* name() const override { return "gemmini"; }
 
-
-  reg_t CUSTOMFN(XCUSTOM_ACC)( rocc_insn_t insn, reg_t xs1, reg_t xs2);
+  reg_t CUSTOMFN(XCUSTOM_ACC)(rocc_insn_t insn, reg_t xs1, reg_t xs2);
   void reset();
+  void set_processor(processor_t* p) { this->p = p; }
 
   void mvin(reg_t dram_addr, reg_t sp_addr, int state_id);
   void mvout(reg_t dram_addr, reg_t sp_addr);
@@ -146,13 +146,14 @@ public:
   void loop_conv_ws_config_5(reg_t rs1, reg_t rs2);
   void loop_conv_ws_config_6(reg_t rs1, reg_t rs2);
 
-  virtual std::vector<insn_desc_t> get_instructions();
-  virtual std::vector<disasm_insn_t*> get_disasms();
+  virtual std::vector<insn_desc_t> get_instructions(const processor_t &p) override;
+  virtual std::vector<disasm_insn_t*> get_disasms(const processor_t *p) override;
 
 private:
   gemmini_state_t gemmini_state;
   reg_t cause;
   reg_t aux;
+  processor_t* p;
 
   const unsigned config_funct = 0;
   const unsigned mvin_funct = 2;
