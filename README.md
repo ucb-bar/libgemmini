@@ -17,8 +17,7 @@ To see Gemmini commit logs, use the `--log-commits` flag in `spike`.
 ## MX (microscaling) extension
 
 Spike functional model for the new microscaling RoCC instructions used by
-the FP4 / FP6 / FP8 tiled-matmul tests. Equivalence vs. the Python golden
-(`fp4_matmul_model.py`, `fp8_matmul_model.py`, `lut_mapping_demo.py`) is
+the FP4 / FP6 / FP8 tiled-matmul tests. Equivalence is
 bit-exact for BF16 outputs and code-exact for requantized outputs.
 
 ### Ported tests (`gemmini-rocc-tests/bareMetalC`)
@@ -41,7 +40,6 @@ All tests are gated on `-DSPIKE_SIM` (added automatically when
 | matmul_tiled_fp6_128x128                | FP6 E3M2 (LUT) | BF16                       | PASS |
 | matmul_tiled_fp6_128x128x512            | FP6 E3M2 (LUT) | BF16                       | PASS |
 | matmul_tiled_fp6_128x128x512_requant    | FP6 E3M2 (LUT) | 4-bit LUT indices + scales | PASS |
-| matmul_tiled_fp4_64x64_DRAMMvout        | FP4 E2M1       | DRAM via HW accumulator    | not supported (uses the accumulator → DRAM mvout path which the spike kernel does not model) |
 
 ### New custom-ISA instructions
 
