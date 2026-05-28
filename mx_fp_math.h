@@ -7,6 +7,9 @@
 namespace mx {
 
 inline uint16_t f32_to_bf16_rne(float x) {
+  // Canonicalize -0 to +0 to match the Python golden, which never emits BF16
+  // 0x8000 (Python's matmul output uses unsigned 0).
+  if (x == 0.0f) return 0;
   union { float f; uint32_t u; } v; v.f = x;
   uint32_t bits = v.u;
   if (((bits >> 23) & 0xFF) == 0xFF) {
@@ -16,7 +19,10 @@ inline uint16_t f32_to_bf16_rne(float x) {
   }
   uint32_t lsb = (bits >> 16) & 1;
   uint32_t rounded = bits + 0x7FFF + lsb;
-  return (uint16_t)((rounded >> 16) & 0xFFFF);
+  uint16_t out = (uint16_t)((rounded >> 16) & 0xFFFF);
+  // Tiny inputs that round down to zero magnitude: also canonicalize.
+  if ((out & 0x7FFF) == 0) return 0;
+  return out;
 }
 
 inline float bf16_to_f32(uint16_t bf) {
@@ -43,6 +49,8 @@ inline float mx_product_saturate(float x, int e_bits, int m_bits) {
   int sat_man = (1 << m_bits) - 2;
   float sat_val = ldexpf(1.0f + sat_man / scale, bias + 1);
   float ax = fabsf(x);
+  // Mirror Python's torch.sign(-0.0) == 0.0 — canonicalize signed zero to +0.
+  if (ax == 0.0f) return 0.0f;
   if (ax > max_normal) return std::signbit(x) ? -sat_val : sat_val;
   return x;
 }
@@ -138,7 +146,10 @@ inline float fp_quantize_rne_scalar(float x, int e_bits, int m_bits) {
   if (E < emin) {
     int shift = (emin - m_bits) - exp2;
     uint64_t sub_sig = _round_div_pow2_rne_u64(num, shift);
-    if (sub_sig == 0) return neg ? -0.0f : 0.0f;
+    // Match Python _round_dyadic_to_scalar: underflow returns unsigned +0,
+    // dropping the sign (so signed-zero never leaks into the accumulator and
+    // ultimately into bf16 0x8000).
+    if (sub_sig == 0) return 0.0f;
     if (sub_sig >= (1ull << m_bits)) {
       uint64_t total_sig = sub_sig;
       int E_fin = emin;
