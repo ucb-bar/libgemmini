@@ -130,6 +130,12 @@ struct gemmini_state_t
   std::vector<uint8_t> mx_scale_a_mem;
   std::vector<uint8_t> mx_scale_b_mem;
   std::vector<uint16_t> mx_smem;
+
+  // FP6 LUTs: per-row 16 × 6-bit FP6 E3M2 codes (one byte each, low 6 bits).
+  // Indexing: lut_x[lut_idx * 16 + entry] = code.
+  std::vector<uint8_t> mx_lut_a;
+  std::vector<uint8_t> mx_lut_b;
+  std::vector<uint8_t> mx_lut_c;
 };
 
 class gemmini_t : public extension_t
@@ -163,6 +169,7 @@ public:
   void mxquant_config_mvout(reg_t rs1, reg_t rs2);
   void mx_load_scales(reg_t rs1, reg_t rs2);
   void mx_read_smem(reg_t rs1, reg_t rs2);
+  void mx_load_lut(reg_t rs1, reg_t rs2);
   void mx_loop_ws_spad(reg_t rs1, reg_t rs2);
 
   void loop_conv_ws(reg_t rs1, reg_t rs2);
@@ -212,6 +219,7 @@ private:
   const unsigned mxquant_config_mvout_funct    = 26;
   const unsigned mx_load_scales_funct          = 27;
   const unsigned mx_read_smem_funct            = 28;
+  const unsigned mx_load_lut_funct             = 29;
 
   const unsigned fence_funct = 127;
 
