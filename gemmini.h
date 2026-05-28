@@ -111,6 +111,25 @@ struct gemmini_state_t
   reg_t a_addr, b_addr, c_addr, d_addr;
   reg_t m, n, k;
   bool repeating_bias;
+
+  uint8_t mx_act_fmt;
+  uint8_t mx_wgt_fmt;
+  uint8_t mx_out_fmt;
+  uint8_t mx_use_lut;
+
+  uint64_t mx_scale_dram;
+  uint16_t mx_tiles_I, mx_tiles_J, mx_tiles_K;
+  uint8_t mx_scale_act_sel, mx_scale_wgt_sel;
+  uint16_t mx_lut_update_granularity;
+
+  uint32_t mx_loop_a_spad, mx_loop_b_spad;
+  uint32_t mx_loop_c_spad;
+  uint8_t  mx_loop_skips;
+  bool     mx_loop_spad_marker;
+
+  std::vector<uint8_t> mx_scale_a_mem;
+  std::vector<uint8_t> mx_scale_b_mem;
+  std::vector<uint16_t> mx_smem;
 };
 
 class gemmini_t : public extension_t
@@ -137,6 +156,14 @@ public:
   void loop_ws_config_addrs_DC(reg_t rs1, reg_t rs2);
   void loop_ws_config_strides_AB(reg_t rs1, reg_t rs2);
   void loop_ws_config_strides_DC(reg_t rs1, reg_t rs2);
+
+  void mvout_spad(reg_t rs1, reg_t rs2);
+  void loop_ws_config_spad_AB(reg_t rs1, reg_t rs2);
+  void loop_ws_config_spad_C(reg_t rs1, reg_t rs2);
+  void mxquant_config_mvout(reg_t rs1, reg_t rs2);
+  void mx_load_scales(reg_t rs1, reg_t rs2);
+  void mx_read_smem(reg_t rs1, reg_t rs2);
+  void mx_loop_ws_spad(reg_t rs1, reg_t rs2);
 
   void loop_conv_ws(reg_t rs1, reg_t rs2);
   void loop_conv_ws_config_1(reg_t rs1, reg_t rs2);
@@ -178,6 +205,13 @@ private:
   const unsigned loop_conv_ws_config_4_funct = 19;
   const unsigned loop_conv_ws_config_5_funct = 20;
   const unsigned loop_conv_ws_config_6_funct = 21;
+
+  const unsigned mvout_spad_funct              = 23;
+  const unsigned loop_ws_config_spad_AB_funct  = 24;
+  const unsigned loop_ws_config_spad_C_funct   = 25;
+  const unsigned mxquant_config_mvout_funct    = 26;
+  const unsigned mx_load_scales_funct          = 27;
+  const unsigned mx_read_smem_funct            = 28;
 
   const unsigned fence_funct = 127;
 
