@@ -5,14 +5,14 @@
 #include <limits.h>
 
 #define XCUSTOM_ACC 3
-#define DIM 16
+#define DIM 32
 #define ADDR_LEN 32
 #define BANK_NUM 4
-#define BANK_ROWS 4096
+#define BANK_ROWS 2048
 #define ACC_ROWS 1024
 #define MAX_BYTES 64
 #define MAX_BLOCK_LEN (MAX_BYTES/(DIM*1))
-#define MAX_BLOCK_LEN_ACC (MAX_BYTES/(DIM*4))
+#define MAX_BLOCK_LEN_ACC 1
 
 typedef int8_t elem_t;
 static const elem_t elem_t_max = 127;
@@ -27,7 +27,7 @@ typedef uint32_t scale_t_bits;
 typedef int32_t scale_acc_t;
 typedef uint32_t scale_acc_t_bits;
 
-typedef float acc_scale_t;
+typedef int32_t acc_scale_t;
 typedef uint32_t acc_scale_t_bits;
 
 #define row_align(blocks) __attribute__((aligned(blocks*DIM*sizeof(elem_t))))
@@ -35,7 +35,7 @@ typedef uint32_t acc_scale_t_bits;
 
 #define MVIN_SCALE_IDENTITY 1.0
 
-#define ACC_SCALE_IDENTITY 1.0
+#define ACC_SCALE_IDENTITY ((acc_scale_t)1 << 30)
 
 // Rounding right shift equation: https://riscv.github.io/documents/riscv-v-spec/#_vector_fixed_point_rounding_mode_register_vxrm
 #define ROUNDING_RIGHT_SHIFT(x, shift) \
@@ -66,16 +66,12 @@ typedef uint32_t acc_scale_t_bits;
          ((((shift) <= 1 ? 0 : ((x) & ((1 << ((shift)-1)) - 1))) != 0) | (((x) >> (shift)) & 1)))) : ((x) << (-(shift))))
 
 #define ACC_SCALE(x, scale) \
-    ({float y = ROUND_NEAR_EVEN((x) * (scale)); y > INT8_MAX ? INT8_MAX : (y < INT8_MIN ? INT8_MIN : (acc_t)y);})
+    ({ int64_t y = (((int64_t)(x) * (int64_t)(scale)) + (1LL << 30)) >> 31; y > INT8_MAX ? INT8_MAX : (y < INT8_MIN ? INT8_MIN : (acc_t)y); })
 
 #define MVIN_SCALE(x, scale) \
     ({float y = ROUND_NEAR_EVEN((x) * (scale)); y > INT8_MAX ? INT8_MAX : (y < INT8_MIN ? INT8_MIN : (elem_t)y);})
 
 #define MVIN_SCALE_ACC(x, scale) (x)
-
-#define ACC_SCALE_T_IS_FLOAT
-#define ACC_SCALE_EXP_BITS 8
-#define ACC_SCALE_SIG_BITS 24
 
 #define ACC_READ_SMALL_WIDTH
 #define ACC_READ_FULL_WIDTH
