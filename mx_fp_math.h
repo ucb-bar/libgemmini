@@ -208,7 +208,14 @@ inline uint8_t fp8_e4m3_to_code(float v) {
   int bias = 7;
   int emin = -6;
   int emax = 8;
-  if (E < emin) return 0;
+  if (E < emin) {
+    // Subnormal range [2^-9, 2^-6): quantum = 2^(emin - m_bits) = 2^-9
+    float quantum = ldexpf(1.0f, emin - 3);
+    int k = round_half_to_even(av / quantum);
+    if (k <= 0) return 0;
+    if (k >= 8) return (uint8_t)((s << 7) | (1 << 3));  // rounds up to min normal
+    return (uint8_t)((s << 7) | k);
+  }
   int E_used = E, mant;
   if (E > emax) { E_used = emax; mant = 6; }
   else {
