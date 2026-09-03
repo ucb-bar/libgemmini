@@ -261,9 +261,13 @@ void gemmini_t::mvout(reg_t dram_addr, reg_t sp_addr) {
         const bool is_last = j + DIM >= cols;
         const auto n_cmd = is_last ? norm_cmd : non_terminating_norm_cmd(norm_cmd);
 
-        should_write = apply_norm(
-            &gemmini_state.accumulator.at(spad_row).at(0),
-            len, n_cmd);
+        // Norm is an accumulator-path feature; only read the accumulator for accumulator mvouts.
+        // (Scratchpad mvouts of large MX outputs address rows beyond accum_rows -> avoid OOB.)
+        if (accumulator) {
+          should_write = apply_norm(
+              &gemmini_state.accumulator.at(spad_row).at(0),
+              len, n_cmd);
+        }
       }
 
       if (!should_write)
@@ -1148,6 +1152,27 @@ void gemmini_t::mx_loop_ws_spad(reg_t rs1, reg_t rs2) {
   const int GROUP = 32;
   const size_t smem_base = (size_t)C_spad * DIM;
 
+  // Internal-spad model (standalone MxGemminiRocket): deposit the MX output (already computed into
+  // mx_smem, row-major) into the normal scratchpad at C_spad so a regular mvout drains it -- same as
+  // the RTL, which routes the requant/BF16 output back into its internal scratchpad. mvout copies
+  // spad bytes raw (DIM int8/row), so byte k of the packed output -> spad[C_spad + k/DIM][k%DIM].
+  // Output word count W (uint16): BF16=M*N, FP8=M*N/2, FP4/FP6=M*N/4 (packing), from mx_out_fmt.
+  auto deposit_to_spad = [&](int M_out, int N_out) {
+    const size_t out_elems = (size_t)M_out * (size_t)N_out;
+    const size_t W = (gemmini_state.mx_out_fmt == 3) ? out_elems        // BF16: 1 u16/elem
+                   : (gemmini_state.mx_out_fmt == 0) ? out_elems / 2     // FP8:  1 byte/elem
+                   :                                    out_elems / 4;   // FP4/FP6: 0.5 byte/elem
+    const size_t need = (size_t)C_spad + (2 * W + DIM - 1) / DIM + 1;
+    if (gemmini_state.spad.size() < need)
+      gemmini_state.spad.resize(need, std::vector<elem_t>(DIM, 0));
+    for (size_t w = 0; w < W; w++) {
+      const uint16_t v = gemmini_state.mx_smem[smem_base + w];
+      const size_t k0 = 2 * w, k1 = 2 * w + 1;
+      gemmini_state.spad[C_spad + k0 / DIM][k0 % DIM] = (elem_t)(v & 0xFF);
+      gemmini_state.spad[C_spad + k1 / DIM][k1 % DIM] = (elem_t)((v >> 8) & 0xFF);
+    }
+  };
+
   if (actf == 0) {
     const uint32_t B_sp = gemmini_state.mx_loop_b_spad - (uint32_t)TK * TJ * DIM;
     const int M_DIM = TI * DIM;
@@ -1246,6 +1271,7 @@ void gemmini_t::mx_loop_ws_spad(reg_t rs1, reg_t rs2) {
         }
       }
     }
+    deposit_to_spad(M_DIM, N_DIM);
     return;
   }
 
@@ -1364,6 +1390,7 @@ void gemmini_t::mx_loop_ws_spad(reg_t rs1, reg_t rs2) {
         }
       }
     }
+    deposit_to_spad(M_DIM, N_DIM);
     return;
   }
 
@@ -1473,6 +1500,7 @@ void gemmini_t::mx_loop_ws_spad(reg_t rs1, reg_t rs2) {
         }
       }
     }
+    deposit_to_spad(M_DIM, N_DIM);
     return;
   }
 }
