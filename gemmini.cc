@@ -6,6 +6,7 @@
 #include <iostream>
 #include <assert.h>
 #include <math.h>
+#include <cfloat>
 
 using namespace std;
 
@@ -1228,28 +1229,48 @@ void gemmini_t::mx_loop_ws_spad(reg_t rs1, reg_t rs2) {
       const reg_t scale_dram = gemmini_state.mx_scale_dram;
       for (int m = 0; m < M_DIM; m++) {
         for (int bi = 0; bi < N_blocks; bi++) {
+          // Block max. Non-finite values are tracked SEPARATELY because NaN loses every `>`
+          // comparison and would otherwise be invisible here; the reference propagates it
+          // (torch's amax does), and an overflow that silently becomes a plausible block is the
+          // single worst failure mode this path had.
           float max_abs = 0.0f;
+          bool has_nan = false, has_inf = false;
           for (int j = bi * GROUP_OUT; j < (bi + 1) * GROUP_OUT; j++) {
             const size_t idx = smem_base + (size_t)m * N_DIM + j;
             float v = bf16_to_f32(gemmini_state.mx_smem[idx]);
+            if (std::isnan(v)) { has_nan = true; continue; }
+            if (std::isinf(v)) { has_inf = true; continue; }
             float a = fabsf(v);
             if (a > max_abs) max_abs = a;
           }
+          // MXQuant's end-to-end convention (MXQuant/end_to_end_linear/mx_block_quant.py::_po2):
+          //   X = 2^floor(log2(max(amax, FLT_EPSILON)))
+          // There is NO `- emax` term, so a block's max lands in [1,2) rather than [256,512).
+          // See planning/chain_seam_hw_notes.md §8: this is the convention the LLM evaluations
+          // use, and it also puts 16*|A|max*|B|max four times UNDER the mesh accumulator's 2^8
+          // bound, which is what made chained MX matmuls overflow. Matches the RTL's
+          // log2_pmax_floor = 0 (MxRequantizer.scala).
+          // The eps clamp subsumes the all-zero block (amax == 0 -> code 104), so there is no
+          // separate sentinel -- and with it goes the old ambiguity where code 0 meant both
+          // "all-zero block" and "the accumulator overflowed".
           uint8_t scale_code;
-          if (max_abs == 0.0f) {
-            scale_code = 0;
+          float scale;
+          if (has_nan || has_inf) {
+            scale_code = 0xFF;                    // E8M0 NaN -- the only out-of-band code E8M0 has
+            // Reproduce the reference's X exactly so the element codes match byte-for-byte:
+            // /inf sends finite siblings to 0 and the inf itself to NaN; /nan sends all to NaN.
+            scale = has_nan ? (float)NAN : (float)INFINITY;
           } else {
-            int max_exp = (int)floorf(log2f(max_abs));
-            int scale_exp = max_exp - 8;
-            int s = scale_exp + 127;
+            const float amax = (max_abs < FLT_EPSILON) ? FLT_EPSILON : max_abs;
+            int s = (int)floorf(log2f(amax)) + 127;
             if (s < 0) s = 0;
             if (s > 254) s = 254;
             scale_code = (uint8_t)s;
+            scale = ldexpf(1.0f, (int)scale_code - 127);
           }
           if (scale_dram != 0) {
             p->get_mmu()->store<uint8_t>(scale_dram + (reg_t)m * N_blocks + bi, scale_code);
           }
-          float scale = ldexpf(1.0f, (int)scale_code - 127);
           // Snapshot BF16 values first; subsequent FP8 packing overwrites the
           // BF16 cells for the same row, so reading after writing would corrupt
           // later iterations.

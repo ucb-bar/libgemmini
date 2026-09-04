@@ -190,18 +190,25 @@ inline float bf16_accum_add(float x, float y) {
   return fp_add_exact(bf16_round(x), bf16_round(y), 8, 7);
 }
 
-// Banker's rounding (round-half-to-even) matching Python 3's int(round(x)).
-inline int round_half_to_even(float x) {
+// Round half AWAY FROM ZERO, which is what the MX reference does: microxcaling's
+// _quantize_elemwise(round="nearest") moves ties away from zero, not to even (measured:
+// 0.5*2^-9 -> 1*2^-9, 1.0625 -> 1.125, -1.0625 -> -1.125). Every caller below passes a
+// non-negative magnitude, so "away from zero" is "up".
+inline int round_half_away(float x) {
   float fl = floorf(x);
-  float frac = x - fl;
-  int fli = (int)fl;
-  if (frac < 0.5f) return fli;
-  if (frac > 0.5f) return fli + 1;
-  return (fli & 1) ? fli + 1 : fli;
+  return (int)fl + ((x - fl) >= 0.5f ? 1 : 0);
 }
 
+// E4M3 NaN code (exp=1111, mant=111), reserved as the out-of-band "input was not finite" signal.
+static const uint8_t FP8_E4M3_NAN = 0x7F;
+
 inline uint8_t fp8_e4m3_to_code(float v) {
-  if (v == 0.0f || !std::isfinite(v)) return 0;
+  // A non-finite input must PROPAGATE, not become zero. Coding it as 0 is how an upstream
+  // accumulator overflow used to vanish into a plausible-looking all-zero block; the reference
+  // returns NaN here (inf -> inf, nan -> nan under _quantize_elemwise).
+  if (std::isnan(v)) return FP8_E4M3_NAN;   // NaN sign is unspecified; the golden emits 0x7F
+  if (std::isinf(v)) return (uint8_t)((std::signbit(v) ? 0x80 : 0x00) | FP8_E4M3_NAN);
+  if (v == 0.0f) return 0;
   int s = std::signbit(v) ? 1 : 0;
   float av = fabsf(v);
   int E = (int)floorf(log2f(av));
@@ -211,8 +218,10 @@ inline uint8_t fp8_e4m3_to_code(float v) {
   if (E < emin) {
     // Subnormal range [2^-9, 2^-6): quantum = 2^(emin - m_bits) = 2^-9
     float quantum = ldexpf(1.0f, emin - 3);
-    int k = round_half_to_even(av / quantum);
-    if (k <= 0) return 0;
+    int k = round_half_away(av / quantum);
+    // Underflow keeps its SIGN: the reference returns -0.0 for a negative value that rounds to
+    // zero (only a -0.0 *input* is canonicalized to +0.0, by the v == 0 test above).
+    if (k <= 0) return (uint8_t)(s << 7);
     if (k >= 8) return (uint8_t)((s << 7) | (1 << 3));  // rounds up to min normal
     return (uint8_t)((s << 7) | k);
   }
@@ -221,7 +230,7 @@ inline uint8_t fp8_e4m3_to_code(float v) {
   else {
     float base = ldexpf(1.0f, E_used);
     float delta = base / 8.0f;
-    int k = round_half_to_even((av - base) / delta);
+    int k = round_half_away((av - base) / delta);
     if (k >= 8) { E_used += 1; k = 0; if (E_used > emax) { E_used = emax; k = 6; } }
     else { int hi = (E_used == emax) ? 6 : 7; if (k > hi) k = hi; if (k < 0) k = 0; }
     mant = k;
@@ -230,6 +239,10 @@ inline uint8_t fp8_e4m3_to_code(float v) {
 }
 
 inline float fp8_e4m3_decode(uint8_t code) {
+  // 0x7F / 0xFF are E4M3 NaN, not 480.0. fp8_e4m3_to_code only ever emits them for a non-finite
+  // input (finite values saturate to 0x7E = 448), so decoding them as a large finite number is
+  // exactly how an overflow would sneak back in as a plausible operand.
+  if ((code & 0x7F) == 0x7F) return std::nanf("");
   int s = (code >> 7) & 1;
   int e = (code >> 3) & 0xF;
   int m = code & 0x7;
