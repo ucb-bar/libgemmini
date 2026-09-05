@@ -59,6 +59,7 @@ void gemmini_state_t::reset()
   mx_loop_a_spad = mx_loop_b_spad = mx_loop_c_spad = 0;
   mx_loop_skips = 0;
   mx_loop_spad_marker = false;
+  mx_loop_reuse_tiled = false;
   mx_scale_a_mem.clear(); mx_scale_a_mem.resize(8192, 0x7f);
   mx_scale_b_mem.clear(); mx_scale_b_mem.resize(8192, 0x7f);
   mx_smem.clear(); mx_smem.resize(sp_matrices * DIM * 16, 0);
@@ -1138,6 +1139,7 @@ void gemmini_t::mx_loop_ws_spad(reg_t rs1, reg_t rs2) {
   using namespace mx;
   gemmini_state.mx_loop_spad_marker = true;
   gemmini_state.mx_loop_skips = (uint8_t)(rs2 & 0x3F);
+  gemmini_state.mx_loop_reuse_tiled = ((rs2 >> 10) & 0x1) != 0;   // LOOP_WS_REQUANT_TILED
   (void)rs1;
 
   const uint32_t C_spad = (uint32_t)((rs2 >> 32) & 0xFFFFFFFFu);
@@ -1166,11 +1168,31 @@ void gemmini_t::mx_loop_ws_spad(reg_t rs1, reg_t rs2) {
     const size_t need = (size_t)C_spad + (2 * W + DIM - 1) / DIM + 1;
     if (gemmini_state.spad.size() < need)
       gemmini_state.spad.resize(need, std::vector<elem_t>(DIM, 0));
+    // LOOP_WS_REQUANT_TILED (rs2 bit10): deposit the requant output in the BLOCK-TILED operand-A
+    // layout instead of flat row-major, so the resident output can be re-read in place as the next
+    // matmul's operand A (chained matmul, zero DRAM). Only for requant formats (FP8/FP4/FP6); BF16
+    // non-requant keeps flat. Byte k (0..2W-1) of the packed output = element (hw=k/N, col=k%N)
+    // [hw = m for FP8, m/2 for the nibble formats, exactly as operand A is packed]. Tiled address =
+    // C_spad + (i*tiles_N + nt)*DIM + r, byte col%DIM (i=hw/DIM, r=hw%DIM, nt=col/DIM) -- identical
+    // to the operand-A read A_sp + (i*tiles_K + kt)*DIM + r. Flat is byte k -> C_spad+k/DIM,k%DIM.
+    const bool tiled = gemmini_state.mx_loop_reuse_tiled && (gemmini_state.mx_out_fmt != 3);
+    const size_t tiles_N = (size_t)N_out / (size_t)DIM;
     for (size_t w = 0; w < W; w++) {
       const uint16_t v = gemmini_state.mx_smem[smem_base + w];
-      const size_t k0 = 2 * w, k1 = 2 * w + 1;
-      gemmini_state.spad[C_spad + k0 / DIM][k0 % DIM] = (elem_t)(v & 0xFF);
-      gemmini_state.spad[C_spad + k1 / DIM][k1 % DIM] = (elem_t)((v >> 8) & 0xFF);
+      for (int half = 0; half < 2; half++) {
+        const size_t k = 2 * w + (size_t)half;
+        const elem_t byte = (elem_t)((half == 0) ? (v & 0xFF) : ((v >> 8) & 0xFF));
+        size_t row, col;
+        if (tiled) {
+          const size_t hw = k / (size_t)N_out, c = k % (size_t)N_out;
+          row = (size_t)C_spad + ((hw / DIM) * tiles_N + c / DIM) * DIM + (hw % DIM);
+          col = c % (size_t)DIM;
+        } else {
+          row = (size_t)C_spad + k / DIM;
+          col = k % DIM;
+        }
+        gemmini_state.spad[row][col] = byte;
+      }
     }
   };
 

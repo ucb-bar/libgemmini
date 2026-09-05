@@ -126,6 +126,7 @@ struct gemmini_state_t
   uint32_t mx_loop_c_spad;
   uint8_t  mx_loop_skips;
   bool     mx_loop_spad_marker;
+  bool     mx_loop_reuse_tiled;   // LOOP_WS rs2 bit10: deposit requant output block-tiled (operand layout)
 
   std::vector<uint8_t> mx_scale_a_mem;
   std::vector<uint8_t> mx_scale_b_mem;
