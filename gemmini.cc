@@ -457,6 +457,7 @@ void gemmini_t::config(reg_t rs1, reg_t rs2) {
 
     if (!set_only_strides) {
       gemmini_state.mx_use_lut = (rs1 >> 5) & 0x1;
+      gemmini_state.mx_fp8_altfmt = (rs1 >> 6) & 0x1;   // LUT holds 8-bit E5M2 codes (vs 6-bit FP6)
       gemmini_state.mx_act_fmt = (rs1 >> 10) & 0x3;
       gemmini_state.mx_wgt_fmt = (rs1 >> 12) & 0x3;
       gemmini_state.mx_out_fmt = (rs1 >> 14) & 0x3;
@@ -1122,17 +1123,22 @@ void gemmini_t::mx_load_lut(reg_t rs1, reg_t rs2) {
             : (sel == 2) ? gemmini_state.mx_lut_c
                          : gemmini_state.mx_lut_b;
   if (dst.size() < (size_t)num_luts * 16) dst.resize((size_t)num_luts * 16, 0);
+  // E5M2 LUTs are 8-bit codes packed 16*8=128b (4 words / 16 bytes); FP6 are 6-bit, 96b (3 words / 12 bytes).
+  const bool altfmt   = gemmini_state.mx_fp8_altfmt != 0;
+  const int  nwords   = altfmt ? 4 : 3;
+  const int  lut_bytes = altfmt ? 16 : 12;
   for (uint32_t li = 0; li < num_luts; li++) {
-    uint32_t dwords[3];
-    for (int w = 0; w < 3; w++) {
+    uint32_t dwords[4];
+    for (int w = 0; w < nwords; w++) {
       uint32_t v = 0;
       for (int b = 0; b < 4; b++) {
-        v |= ((uint32_t)read_from_dram<uint8_t>(dram_addr + li * 12 + w * 4 + b)) << (b * 8);
+        v |= ((uint32_t)read_from_dram<uint8_t>(dram_addr + li * lut_bytes + w * 4 + b)) << (b * 8);
       }
       dwords[w] = v;
     }
     uint8_t codes[16];
-    mx::unpack_lut_96bit(dwords, codes);
+    if (altfmt) mx::unpack_lut_128bit(dwords, codes);
+    else        mx::unpack_lut_96bit(dwords, codes);
     for (int e = 0; e < 16; e++) dst[(size_t)li * 16 + e] = codes[e];
   }
 }
@@ -1346,6 +1352,8 @@ void gemmini_t::mx_loop_ws_spad(reg_t rs1, reg_t rs2) {
     const int M_DIM = TI * TM;
     const int N_DIM = TJ * TN;
     const int G = gemmini_state.mx_lut_update_granularity;
+    // LUT holds 6-bit FP6 codes, or 8-bit E5M2 codes when the altfmt bit is set (config_ex rs1[6]).
+    float (*lut_decode)(uint8_t) = gemmini_state.mx_fp8_altfmt ? fp8_e5m2_decode : fp6_e3m2_decode;
 
     for (uint16_t k_outer = 0; k_outer < TK; k_outer++) {
       const size_t group = (size_t)(k_outer * DIM) / GROUP;
@@ -1361,14 +1369,14 @@ void gemmini_t::mx_loop_ws_spad(reg_t rs1, reg_t rs2) {
               uint8_t nib = (m & 1) ? ((byte >> 4) & 0xF) : (byte & 0xF);
               const size_t lut_idx = (size_t)((i * TM + m) >> G);
               const uint8_t code = gemmini_state.mx_lut_a[lut_idx * 16 + nib];
-              A_col[m] = fp6_e3m2_decode(code);
+              A_col[m] = lut_decode(code);
             }
             for (int n = 0; n < TN; n++) {
               uint8_t byte = (uint8_t)gemmini_state.spad.at(B_t + kk).at(n >> 1);
               uint8_t nib = (n & 1) ? ((byte >> 4) & 0xF) : (byte & 0xF);
               const size_t lut_idx = (size_t)((j * TN + n) >> G);
               const uint8_t code = gemmini_state.mx_lut_b[lut_idx * 16 + nib];
-              B_row[n] = fp6_e3m2_decode(code);
+              B_row[n] = lut_decode(code);
             }
             const int ae = acc_e[kk], am = acc_m[kk];
             for (int r = 0; r < TM; r++)
@@ -1402,9 +1410,12 @@ void gemmini_t::mx_loop_ws_spad(reg_t rs1, reg_t rs2) {
     // onto the per-row C_lut and pack the resulting 4-bit LUT index in HW-tiled
     // layout (byte (m/2, j): low nibble for m=2r, high for m=2r+1).
     if (gemmini_state.mx_out_fmt == 1) {
+      const bool altfmt   = gemmini_state.mx_fp8_altfmt != 0;   // out = FP8 E5M2 (else FP6)
       const int GROUP_OUT = 32;
       const int N_blocks  = N_DIM / GROUP_OUT;
-      const int log2_pmax = 4;  // FP6 E3M2 emax = (1<<3)-1-3 = 4
+      // log2_pmax = 1 << (e_bits-1): FP6(e=3)->4, E5M2(e=5)->16. Matches the golden
+      // fp8_matmul_model.matrix_mx_requantize (block-max float exponent - log2_pmax).
+      const int log2_pmax = altfmt ? 16 : 4;
       const reg_t scale_dram = gemmini_state.mx_scale_dram;
       for (int m = 0; m < M_DIM; m++) {
         const size_t lut_idx = (size_t)(m >> G);
@@ -1447,8 +1458,10 @@ void gemmini_t::mx_loop_ws_spad(reg_t rs1, reg_t rs2) {
             const int j = bi * GROUP_OUT + jj;
             float scaled = vals[jj] / scale;
             uint16_t scaled_bf16 = f32_to_bf16_rne(scaled);
-            uint8_t fp6_code = bf16_bits_to_fp6_e3m2_code(scaled_bf16);
-            uint8_t code = (uint8_t)fp6e3m2_nearest_finder(fp6_code, lut_codes);
+            uint8_t elem_code = altfmt ? bf16_bits_to_e5m2_code(scaled_bf16)
+                                       : bf16_bits_to_fp6_e3m2_code(scaled_bf16);
+            uint8_t code = (uint8_t)(altfmt ? fp8_e5m2_nearest_finder(elem_code, lut_codes)
+                                            : fp6e3m2_nearest_finder(elem_code, lut_codes));
             const size_t byte_pos = (size_t)(m >> 1) * N_DIM + j;
             const size_t u16_idx  = smem_base + byte_pos / 2;
             uint16_t cur = gemmini_state.mx_smem[u16_idx];

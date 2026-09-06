@@ -399,6 +399,96 @@ inline void unpack_lut_96bit(const uint32_t dwords[3], uint8_t codes[16]) {
   }
 }
 
+// ---- FP8 E5M2 LUT path (analog of the FP6 functions above) ------------------
+// Decode an 8-bit FP8 E5M2 code (1 sign | 5 exp | 2 mant, bias=15) to float.
+// Subnormal (exp=0): value = mant * 2^(emin - mant_bits) = mant * 2^-16. exp=31 is Inf/NaN.
+inline float fp8_e5m2_decode(uint8_t code) {
+  int s = (code >> 7) & 1;
+  int e = (code >> 2) & 0x1F;
+  int m = code & 0x3;
+  if (e == 0x1F) return m ? std::nanf("") : (s ? -INFINITY : INFINITY);
+  float val;
+  if (e == 0) val = m * ldexpf(1.0f, -16);
+  else        val = (1.0f + m * 0.25f) * ldexpf(1.0f, e - 15);
+  return s ? -val : val;
+}
+
+// Unpack 16 x 8-bit FP8 codes from 4 little-endian uint32 words (128 bits).
+inline void unpack_lut_128bit(const uint32_t dwords[4], uint8_t codes[16]) {
+  for (int i = 0; i < 16; i++)
+    codes[i] = (uint8_t)((dwords[i >> 2] >> ((i & 3) * 8)) & 0xFF);
+}
+
+// FP8 E5M2 code -> signed fixed-point magnitude (mirrors FP8NearestFinder.scala, altfmt=true:
+// expW=5, mantW=2, bias=15, sigW=3, minSExp=-14, maxShift=29, fixedW=32, shiftW=5).
+inline long long fp8_e5m2_to_fixed_point(uint8_t val) {
+  int sign = (val >> 7) & 1;
+  int exp  = (val >> 2) & 0x1F;
+  int mant = val & 0x3;
+  int is_zero = (exp == 0) && (mant == 0);
+  int implicit = (exp == 0) ? 0 : 1;
+  int sig = (implicit << 2) | mant;                    // sigW = 3 bits
+  int s_exp = (exp == 0) ? (1 - 15) : (exp - 15);      // minSExp = -14 for subnormals
+  int shift_amt = (s_exp + (15 - 1)) & 0x1F;           // (s_exp + bias-1), masked to shiftW=5
+  long long shifted = ((long long)sig << shift_amt) & 0xFFFFFFFFLL;  // masked to fixedW=32
+  long long signed_val = sign ? -shifted : shifted;
+  return is_zero ? 0 : signed_val;
+}
+
+// Nearest LUT-entry finder for E5M2. Tie-breaking: lower index wins.
+inline int fp8_e5m2_nearest_finder(uint8_t in_code, const uint8_t lut[16]) {
+  long long fixed_in = fp8_e5m2_to_fixed_point(in_code);
+  int best = 0;
+  long long best_d = 0;
+  for (int i = 0; i < 16; i++) {
+    long long f = fp8_e5m2_to_fixed_point(lut[i]);
+    long long d = fixed_in - f;
+    if (d < 0) d = -d;
+    d &= 0x1FFFFFFFFLL;                                 // diffW = fixedW + 1 = 33 bits
+    if (i == 0 || d < best_d) { best_d = d; best = i; }
+  }
+  return best;
+}
+
+// BF16 bits -> 8-bit E5M2 code (RNE ties-to-even; overflow -> max finite 0x7B; Inf/NaN preserved;
+// subnormals down to 2^-16). Matches the golden BF16 -> fp8:e5m2 (qtorch nearest_even) requant cast.
+inline uint8_t bf16_bits_to_e5m2_code(uint16_t bits) {
+  int sign = (bits >> 15) & 1;
+  int E = (bits >> 7) & 0xFF;              // bf16 exponent
+  int M = bits & 0x7F;                     // bf16 mantissa (7 bits)
+  int s7 = sign << 7;
+  if (E == 0xFF) return (uint8_t)(s7 | (M ? 0x7D : 0x7C));   // NaN / Inf (exp field 31)
+  if (E == 0)   return (uint8_t)s7;                          // zero / bf16 subnormal -> signed zero
+  int e = E - 127;                         // unbiased
+  if (e >= -14 && e <= 15) {               // E5M2 normal range
+    int q       = (M >> 5) & 0x3;          // top 2 mantissa bits
+    int r       = (M >> 4) & 1;            // round bit
+    int round_up = r;                      // round half away from zero (matches golden + BF16ToE4M3)
+    int sig     = q + round_up;            // 0..4
+    int carry   = sig >> 2;
+    int mant    = carry ? 0 : sig;
+    int exp_out = e + carry;
+    if (exp_out > 15) return (uint8_t)(s7 | 0x7B);           // overflow -> max finite
+    return (uint8_t)(s7 | (((exp_out + 15) & 0x1F) << 2) | (mant & 0x3));
+  }
+  if (e > 15) return (uint8_t)(s7 | 0x7B);                   // overflow -> max finite (57344)
+  // Subnormal: value = (128+M) * 2^(e-7); quantum = 2^-16 -> k = RNE((128+M) / 2^shift).
+  int sig8  = 0x80 | M;                    // 1.M, 8 bits
+  int shift = -(e + 9);                    // e <= -15 -> shift >= 6
+  int k;
+  if (shift >= 9) {
+    k = 0;
+  } else {
+    int rem = sig8 & ((1 << shift) - 1);
+    int half = 1 << (shift - 1);
+    k = sig8 >> shift;
+    if (rem >= half) k += 1;                                 // round half away from zero
+  }
+  if (k <= 0) return (uint8_t)s7;                            // -> signed zero
+  if (k >= 4) return (uint8_t)(s7 | (1 << 2));               // rounds up to min normal (0x04)
+  return (uint8_t)(s7 | (k & 0x3));                          // subnormal: exp field 0, mant k
+}
+
 // BF16 -> E3M1 (RNE) -> E2M1 (deterministic map) -> 4-bit FP4 code, mirroring
 // fp4_matmul_model.py::hw_bf16_to_e2m1.
 inline uint8_t bf16_bits_to_fp4_e2m1_code(uint16_t bf16) {

@@ -116,6 +116,7 @@ struct gemmini_state_t
   uint8_t mx_wgt_fmt;
   uint8_t mx_out_fmt;
   uint8_t mx_use_lut;
+  uint8_t mx_fp8_altfmt;   // config_ex rs1 bit 6: LUT holds 8-bit E5M2 codes (else 6-bit FP6)
 
   uint64_t mx_scale_dram;
   uint16_t mx_tiles_I, mx_tiles_J, mx_tiles_K;
