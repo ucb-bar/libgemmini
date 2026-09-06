@@ -60,6 +60,7 @@ void gemmini_state_t::reset()
   mx_loop_skips = 0;
   mx_loop_spad_marker = false;
   mx_loop_reuse_tiled = false;
+  mx_loop_scale_resident = false;
   mx_scale_a_mem.clear(); mx_scale_a_mem.resize(8192, 0x7f);
   mx_scale_b_mem.clear(); mx_scale_b_mem.resize(8192, 0x7f);
   mx_smem.clear(); mx_smem.resize(sp_matrices * DIM * 16, 0);
@@ -1077,6 +1078,11 @@ void gemmini_t::mxquant_config_mvout(reg_t rs1, reg_t rs2) {
   gemmini_state.mx_tiles_K             = (rs1 >> 51) & 0x1FF;
   gemmini_state.mx_scale_act_sel       = (rs1 >> 60) & 0x1;
   gemmini_state.mx_scale_wgt_sel       = (rs1 >> 61) & 0x1;
+  // C8.3: MX_SCALE_RESIDENT sourced from rs1 bit 62 of the mxquant scale-config (a FREE bit here).
+  // The requant scale post-passes read this to also write the act-scale window transposed [GN][M].
+  // Sourced here (not the loop flag) so the RTL requantizer -- which reads ex io.mx set by this same
+  // instruction -- sees the identical bit. gemmini_mxquant_config_mvout_resident() sets it.
+  gemmini_state.mx_loop_scale_resident = ((rs1 >> 63) & 0x1) != 0;   // MX_SCALE_RESIDENT (bit63, decoupled from bit62 counter_reset)
   gemmini_state.mx_lut_update_granularity = rs2 & 0xFFFF;
 }
 
@@ -1140,6 +1146,9 @@ void gemmini_t::mx_loop_ws_spad(reg_t rs1, reg_t rs2) {
   gemmini_state.mx_loop_spad_marker = true;
   gemmini_state.mx_loop_skips = (uint8_t)(rs2 & 0x3F);
   gemmini_state.mx_loop_reuse_tiled = ((rs2 >> 10) & 0x1) != 0;   // LOOP_WS_REQUANT_TILED
+  // C8.3: mx_loop_scale_resident is no longer sourced here (rs2 bit11). It now comes from
+  // gemmini_mxquant_config_mvout rs1 bit 62 (see mxquant_config_mvout), so the RTL requantizer
+  // can see the same flag on the scale-config path. rs2 bit11 is left free.
   (void)rs1;
 
   const uint32_t C_spad = (uint32_t)((rs2 >> 32) & 0xFFFFFFFFu);
@@ -1293,6 +1302,16 @@ void gemmini_t::mx_loop_ws_spad(reg_t rs1, reg_t rs2) {
           if (scale_dram != 0) {
             p->get_mmu()->store<uint8_t>(scale_dram + (reg_t)m * N_blocks + bi, scale_code);
           }
+          // C8.1 scale residency: also write the act-scale window in TRANSPOSED [GN][M] layout
+          // (a_off = block*M + row), so the next matmul reads these as its A-scales in place -- no
+          // DRAM round-trip / SW reload. Runs in the STORE phase (after this matmul's compute has
+          // finished reading the current A-scales), so no read/write race on Spike. Gated flag.
+          if (gemmini_state.mx_loop_scale_resident) {
+            const size_t a_off_out = (size_t)bi * (size_t)M_DIM + (size_t)m;
+            if (a_off_out >= gemmini_state.mx_scale_a_mem.size())
+              gemmini_state.mx_scale_a_mem.resize(a_off_out + 1, 0x7f);
+            gemmini_state.mx_scale_a_mem[a_off_out] = scale_code;
+          }
           // Snapshot BF16 values first; subsequent FP8 packing overwrites the
           // BF16 cells for the same row, so reading after writing would corrupt
           // later iterations.
@@ -1413,6 +1432,16 @@ void gemmini_t::mx_loop_ws_spad(reg_t rs1, reg_t rs2) {
           if (scale_dram != 0) {
             p->get_mmu()->store<uint8_t>(scale_dram + (reg_t)m * N_blocks + bi, scale_code);
           }
+          // C8.1 scale residency: also write the act-scale window in TRANSPOSED [GN][M] layout
+          // (a_off = block*M + row), so the next matmul reads these as its A-scales in place -- no
+          // DRAM round-trip / SW reload. Runs in the STORE phase (after this matmul's compute has
+          // finished reading the current A-scales), so no read/write race on Spike. Gated flag.
+          if (gemmini_state.mx_loop_scale_resident) {
+            const size_t a_off_out = (size_t)bi * (size_t)M_DIM + (size_t)m;
+            if (a_off_out >= gemmini_state.mx_scale_a_mem.size())
+              gemmini_state.mx_scale_a_mem.resize(a_off_out + 1, 0x7f);
+            gemmini_state.mx_scale_a_mem[a_off_out] = scale_code;
+          }
           float scale = fpe8m0_decode(scale_code);
           for (int jj = 0; jj < GROUP_OUT; jj++) {
             const int j = bi * GROUP_OUT + jj;
@@ -1522,6 +1551,16 @@ void gemmini_t::mx_loop_ws_spad(reg_t rs1, reg_t rs2) {
           }
           if (scale_dram != 0) {
             p->get_mmu()->store<uint8_t>(scale_dram + (reg_t)m * N_blocks + bi, scale_code);
+          }
+          // C8.1 scale residency: also write the act-scale window in TRANSPOSED [GN][M] layout
+          // (a_off = block*M + row), so the next matmul reads these as its A-scales in place -- no
+          // DRAM round-trip / SW reload. Runs in the STORE phase (after this matmul's compute has
+          // finished reading the current A-scales), so no read/write race on Spike. Gated flag.
+          if (gemmini_state.mx_loop_scale_resident) {
+            const size_t a_off_out = (size_t)bi * (size_t)M_DIM + (size_t)m;
+            if (a_off_out >= gemmini_state.mx_scale_a_mem.size())
+              gemmini_state.mx_scale_a_mem.resize(a_off_out + 1, 0x7f);
+            gemmini_state.mx_scale_a_mem[a_off_out] = scale_code;
           }
           float scale = fpe8m0_decode(scale_code);
           for (int jj = 0; jj < GROUP_OUT; jj++) {
