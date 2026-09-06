@@ -1123,23 +1123,24 @@ void gemmini_t::mx_load_lut(reg_t rs1, reg_t rs2) {
             : (sel == 2) ? gemmini_state.mx_lut_c
                          : gemmini_state.mx_lut_b;
   if (dst.size() < (size_t)num_luts * 16) dst.resize((size_t)num_luts * 16, 0);
-  // E5M2 LUTs are 8-bit codes packed 16*8=128b (4 words / 16 bytes); FP6 are 6-bit, 96b (3 words / 12 bytes).
-  const bool altfmt   = gemmini_state.mx_fp8_altfmt != 0;
-  const int  nwords   = altfmt ? 4 : 3;
-  const int  lut_bytes = altfmt ? 16 : 12;
+  // The load carries the codebook ENTRY WIDTH (datatype): FP6/E2M3=6, FP8 E5M2=8. Codebooks are stored in
+  // their native packing (16 * entry_bits bits per table, LE bitstream); each code is stored as one uint8
+  // (fp6 in the low 6). fp6_e3m2_decode reads only the low 6, so a 6-bit code in a uint8 decodes correctly.
+  int entry_bits = (int)((rs2 >> 34) & 0x3F);
+  if (entry_bits == 0) entry_bits = 6;                 // default FP6
+  const int lut_bytes = (16 * entry_bits) / 8;          // 12 (fp6) or 16 (e5m2)
   for (uint32_t li = 0; li < num_luts; li++) {
-    uint32_t dwords[4];
-    for (int w = 0; w < nwords; w++) {
-      uint32_t v = 0;
-      for (int b = 0; b < 4; b++) {
-        v |= ((uint32_t)read_from_dram<uint8_t>(dram_addr + li * lut_bytes + w * 4 + b)) << (b * 8);
+    const reg_t tbase = dram_addr + (reg_t)li * lut_bytes;
+    for (int e = 0; e < 16; e++) {
+      int bit0 = e * entry_bits;
+      uint32_t code = 0;
+      for (int k = 0; k < entry_bits; k++) {
+        int gbit = bit0 + k;
+        uint8_t byte = read_from_dram<uint8_t>(tbase + (gbit >> 3));
+        code |= ((uint32_t)((byte >> (gbit & 7)) & 1)) << k;
       }
-      dwords[w] = v;
+      dst[(size_t)li * 16 + e] = (uint8_t)code;
     }
-    uint8_t codes[16];
-    if (altfmt) mx::unpack_lut_128bit(dwords, codes);
-    else        mx::unpack_lut_96bit(dwords, codes);
-    for (int e = 0; e < 16; e++) dst[(size_t)li * 16 + e] = codes[e];
   }
 }
 
