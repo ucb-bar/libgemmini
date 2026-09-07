@@ -52,6 +52,7 @@ void gemmini_state_t::reset()
   mx_wgt_fmt = 0;
   mx_out_fmt = 0;
   mx_use_lut = 0;
+  mx_lut_en = 0;   // G1: runtime LUT-usage flag (set by MX_LOAD_LUT, cleared by MX_LUT_DISABLE)
   mx_scale_dram = 0;
   mx_tiles_I = mx_tiles_J = mx_tiles_K = 0;
   mx_scale_act_sel = mx_scale_wgt_sel = 0;
@@ -1116,6 +1117,7 @@ void gemmini_t::mx_read_smem(reg_t rs1, reg_t rs2) {
 //   rs1 = dram_addr
 //   rs2 = (sel << 32) | num_luts ; sel: 0=B, 1=A, 2=C
 void gemmini_t::mx_load_lut(reg_t rs1, reg_t rs2) {
+  gemmini_state.mx_lut_en = 1;   // G1: loading a codebook enables runtime LUT usage
   const reg_t dram_addr = rs1;
   const uint32_t num_luts = (uint32_t)(rs2 & 0xFFFFFFFFu);
   const uint8_t  sel      = (uint8_t)((rs2 >> 32) & 0x3);
@@ -1212,7 +1214,9 @@ void gemmini_t::mx_loop_ws_spad(reg_t rs1, reg_t rs2) {
     }
   };
 
-  if (actf == 0) {
+  if (actf == 0 && !gemmini_state.mx_fp8_altfmt && !gemmini_state.mx_lut_en) {
+    // Plain E4M3 (fp8, altfmt=0): direct 8-bit operands, single throughput (1 element/lane). E4M3-quad
+    // (lut_en) and E5M2 (altfmt=1, always lut) are handled by the LUT branch below.
     const uint32_t B_sp = gemmini_state.mx_loop_b_spad - (uint32_t)TK * TJ * DIM;
     const int M_DIM = TI * DIM;
     const int N_DIM = TJ * DIM;
@@ -1344,17 +1348,19 @@ void gemmini_t::mx_loop_ws_spad(reg_t rs1, reg_t rs2) {
     return;
   }
 
-  if (actf == 1) {
-    // FP6 E3M2 path. A/B in spad are 4-bit LUT INDICES (nibble-packed,
-    // HW-tiled A with 2 m-rows per byte interleaved per kk). LUT lookup
-    // gives the 6-bit FP6 code; matmul math otherwise mirrors FP4/FP8.
+  if (actf == 1 || (actf == 0 && (gemmini_state.mx_lut_en || gemmini_state.mx_fp8_altfmt))) {
+    // LUT path (4-wide). A/B in spad are 4-bit LUT INDICES (nibble-packed). Symmetric encoding:
+    //   actf==0 (fp8): altfmt0 -> E4M3 (quad, needs lut_en); altfmt1 -> E5M2 (always lut).
+    //   actf==1 (fp6): altfmt0 -> E3M2;                       altfmt1 -> E2M3 (quad, lut-only).
     const int TM = 32, TN = 32;
     const uint32_t B_sp = gemmini_state.mx_loop_b_spad - (uint32_t)TK * TJ * DIM;
     const int M_DIM = TI * TM;
     const int N_DIM = TJ * TN;
     const int G = gemmini_state.mx_lut_update_granularity;
-    // LUT holds 6-bit FP6 codes, or 8-bit E5M2 codes when the altfmt bit is set (config_ex rs1[6]).
-    float (*lut_decode)(uint8_t) = gemmini_state.mx_fp8_altfmt ? fp8_e5m2_decode : fp6_e3m2_decode;
+    // Decode by (code, altfmt): fp8 -> altfmt? E5M2 : E4M3 ; fp6 -> altfmt? E2M3 : E3M2.
+    float (*lut_decode)(uint8_t) = (actf == 0)
+      ? (gemmini_state.mx_fp8_altfmt ? fp8_e5m2_decode : fp8_e4m3_decode)
+      : (gemmini_state.mx_fp8_altfmt ? fp6_e2m3_decode : fp6_e3m2_decode);
 
     for (uint16_t k_outer = 0; k_outer < TK; k_outer++) {
       const size_t group = (size_t)(k_outer * DIM) / GROUP;
@@ -2176,6 +2182,8 @@ reg_t gemmini_t::CUSTOMFN(XCUSTOM_ACC)(rocc_insn_t insn, reg_t xs1, reg_t xs2) {
     mx_read_smem(xs1, xs2);
   } else if (insn.funct == mx_load_lut_funct) {
     mx_load_lut(xs1, xs2);
+  } else if (insn.funct == mx_lut_disable_funct) {
+    gemmini_state.mx_lut_en = 0;   // G1: clear runtime LUT-usage flag
   } else if (insn.funct == loop_conv_ws_config_1_funct) {
     loop_conv_ws_config_1(xs1, xs2);
   } else if (insn.funct == loop_conv_ws_config_2_funct) {

@@ -117,6 +117,7 @@ struct gemmini_state_t
   uint8_t mx_out_fmt;
   uint8_t mx_use_lut;
   uint8_t mx_fp8_altfmt;   // config_ex rs1 bit 6: LUT holds 8-bit E5M2 codes (else 6-bit FP6)
+  uint8_t mx_lut_en;       // G1: runtime LUT-usage flag (MX_LOAD_LUT sets, MX_LUT_DISABLE clears, default 0)
 
   uint64_t mx_scale_dram;
   uint16_t mx_tiles_I, mx_tiles_J, mx_tiles_K;
@@ -223,6 +224,7 @@ private:
   const unsigned mx_load_scales_funct          = 27;
   const unsigned mx_read_smem_funct            = 28;
   const unsigned mx_load_lut_funct             = 29;
+  const unsigned mx_lut_disable_funct          = 30;
 
   const unsigned fence_funct = 127;
 

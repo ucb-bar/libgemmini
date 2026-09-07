@@ -281,6 +281,17 @@ inline float fp6_e3m2_decode(uint8_t code) {
   return s ? -val : val;
 }
 
+// FP6 E2M3: sign(5), exp2(4:3, bias 1), man3(2:0). 4-wide-via-LUT-only sibling of E3M2 on code1/altfmt1.
+inline float fp6_e2m3_decode(uint8_t code) {
+  int s = (code >> 5) & 1;
+  int e = (code >> 3) & 0x3;
+  int m = code & 0x7;
+  float val;
+  if (e == 0) val = m * 0.125f;                                // subnormal: (m/8) * 2^(1-1)
+  else        val = (1.0f + m * 0.125f) * ldexpf(1.0f, e - 1); // bias 1
+  return s ? -val : val;
+}
+
 // BF16 bits -> E4M2 float (RNE), matches lut_mapping_demo._bf16_to_e4m2_rne.
 inline float bf16_bits_to_e4m2_rne(uint16_t bits) {
   int sign_bit = (bits >> 15) & 1;
