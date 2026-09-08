@@ -461,6 +461,38 @@ inline int fp8_e5m2_nearest_finder(uint8_t in_code, const uint8_t lut[16]) {
   return best;
 }
 
+// E4M3 8-bit code -> exact value * 2^(bias-1) as a signed integer (monotonic magnitude for nearest),
+// mirroring the RTL FP8NearestFinder(altfmt=false): expW=4, mantW=3, bias=7, sigW=4, fixedW=18,
+// shiftW=4. Smallest subnormal maps to 1. Used for the E4M3-quad 4-bit-LUT requant output projection.
+inline long long fp8_e4m3_to_fixed_point(uint8_t val) {
+  int sign = (val >> 7) & 1;
+  int exp  = (val >> 3) & 0xF;
+  int mant = val & 0x7;
+  int is_zero = (exp == 0) && (mant == 0);
+  int implicit = (exp == 0) ? 0 : 1;
+  int sig = (implicit << 3) | mant;                    // sigW = 4 bits
+  int s_exp = (exp == 0) ? (1 - 7) : (exp - 7);        // minSExp = -6 for subnormals
+  int shift_amt = (s_exp + (7 - 1)) & 0xF;             // (s_exp + bias-1), masked to shiftW=4
+  long long shifted = ((long long)sig << shift_amt) & 0x3FFFFLL;  // masked to fixedW=18
+  long long signed_val = sign ? -shifted : shifted;
+  return is_zero ? 0 : signed_val;
+}
+
+// Nearest LUT-entry finder for E4M3. Tie-breaking: lower index wins. (diffW = fixedW+1 = 19 bits.)
+inline int fp8_e4m3_nearest_finder(uint8_t in_code, const uint8_t lut[16]) {
+  long long fixed_in = fp8_e4m3_to_fixed_point(in_code);
+  int best = 0;
+  long long best_d = 0;
+  for (int i = 0; i < 16; i++) {
+    long long f = fp8_e4m3_to_fixed_point(lut[i]);
+    long long d = fixed_in - f;
+    if (d < 0) d = -d;
+    d &= 0x7FFFFLL;                                     // diffW = fixedW + 1 = 19 bits
+    if (i == 0 || d < best_d) { best_d = d; best = i; }
+  }
+  return best;
+}
+
 // BF16 bits -> 8-bit E5M2 code (RNE ties-to-even; overflow -> max finite 0x7B; Inf/NaN preserved;
 // subnormals down to 2^-16). Matches the golden BF16 -> fp8:e5m2 (qtorch nearest_even) requant cast.
 inline uint8_t bf16_bits_to_e5m2_code(uint16_t bits) {

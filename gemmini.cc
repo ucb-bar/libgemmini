@@ -1424,16 +1424,21 @@ void gemmini_t::mx_loop_ws_spad(reg_t rs1, reg_t rs2) {
     // Symmetric 4-bit-LUT requant output. Which sub-format is written is chosen by (mx_out_fmt, altfmt):
     //   fp8/code0 + altfmt1 -> E5M2 (log2_pmax=16); fp6/code1 + altfmt0 -> E3M2 (4); + altfmt1 -> E2M3 (2).
     // All three pack 4-bit LUT indices (nibble-packed, HW-tiled) via the per-row C_lut nearest-finder.
-    const bool alt_out    = gemmini_state.mx_fp8_altfmt != 0;
-    const bool out_e5m2   = (gemmini_state.mx_out_fmt == 0) && alt_out;
-    const bool out_e2m3   = (gemmini_state.mx_out_fmt == 1) && alt_out;
-    const bool out_e3m2   = (gemmini_state.mx_out_fmt == 1) && !alt_out;
-    if (out_e5m2 || out_e2m3 || out_e3m2) {
+    const bool alt_out       = gemmini_state.mx_fp8_altfmt != 0;
+    const bool out_e5m2      = (gemmini_state.mx_out_fmt == 0) && alt_out;
+    // E4M3-quad: code0/altfmt0 requant output, but we are in the LUT branch (lut_en set), so it emits
+    // 4-bit LUT indices like the others. E4M3-single (non-lut) never reaches here (handled 8-bit above).
+    const bool out_e4m3_quad = (gemmini_state.mx_out_fmt == 0) && !alt_out;
+    const bool out_e2m3      = (gemmini_state.mx_out_fmt == 1) && alt_out;
+    const bool out_e3m2      = (gemmini_state.mx_out_fmt == 1) && !alt_out;
+    if (out_e5m2 || out_e4m3_quad || out_e2m3 || out_e3m2) {
       const int GROUP_OUT = 32;
       const int N_blocks  = N_DIM / GROUP_OUT;
-      // log2_pmax = 1 << (e_bits-1): E3M2(e=3)->4, E5M2(e=5)->16, E2M3(e=2)->2. Matches the golden
-      // matrix_mx_requantize (block-max float exponent - log2_pmax).
-      const int log2_pmax = out_e5m2 ? 16 : (out_e2m3 ? 2 : 4);
+      // log2_pmax = emax = 1<<(e_bits-1) for EVERY nibble/LUT output: E4M3-quad(e=4)->8, E5M2(e=5)->16,
+      // E2M3(e=2)->2, E3M2(e=3)->4. E4M3-quad follows the OCP emax convention like the other nibble outputs
+      // (NOT the FP8 _po2 pmax=0 -- that convention is only for the 8-bit E4M3-single direct path above).
+      // Matches the golden fp8_matmul_model.matrix_mx_requantize (log2_pmax = 1<<(e_bits-1)).
+      const int log2_pmax = out_e4m3_quad ? 8 : (out_e5m2 ? 16 : (out_e2m3 ? 2 : 4));
       const reg_t scale_dram = gemmini_state.mx_scale_dram;
       for (int m = 0; m < M_DIM; m++) {
         const size_t lut_idx = (size_t)(m >> G);
@@ -1476,12 +1481,14 @@ void gemmini_t::mx_loop_ws_spad(reg_t rs1, reg_t rs2) {
             const int j = bi * GROUP_OUT + jj;
             float scaled = vals[jj] / scale;
             uint16_t scaled_bf16 = f32_to_bf16_rne(scaled);
-            uint8_t elem_code = out_e5m2 ? bf16_bits_to_e5m2_code(scaled_bf16)
-                              : out_e2m3 ? bf16_bits_to_fp6_e2m3_code(scaled_bf16)
-                                         : bf16_bits_to_fp6_e3m2_code(scaled_bf16);
-            uint8_t code = (uint8_t)(out_e5m2 ? fp8_e5m2_nearest_finder(elem_code, lut_codes)
-                                   : out_e2m3 ? fp6e2m3_nearest_finder(elem_code, lut_codes)
-                                              : fp6e3m2_nearest_finder(elem_code, lut_codes));
+            uint8_t elem_code = out_e5m2      ? bf16_bits_to_e5m2_code(scaled_bf16)
+                              : out_e4m3_quad ? fp8_e4m3_to_code(bf16_to_f32(scaled_bf16))
+                              : out_e2m3      ? bf16_bits_to_fp6_e2m3_code(scaled_bf16)
+                                              : bf16_bits_to_fp6_e3m2_code(scaled_bf16);
+            uint8_t code = (uint8_t)(out_e5m2      ? fp8_e5m2_nearest_finder(elem_code, lut_codes)
+                                   : out_e4m3_quad ? fp8_e4m3_nearest_finder(elem_code, lut_codes)
+                                   : out_e2m3      ? fp6e2m3_nearest_finder(elem_code, lut_codes)
+                                                   : fp6e3m2_nearest_finder(elem_code, lut_codes));
             const size_t byte_pos = (size_t)(m >> 1) * N_DIM + j;
             const size_t u16_idx  = smem_base + byte_pos / 2;
             uint16_t cur = gemmini_state.mx_smem[u16_idx];
