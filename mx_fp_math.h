@@ -500,6 +500,71 @@ inline uint8_t bf16_bits_to_e5m2_code(uint16_t bits) {
   return (uint8_t)(s7 | (k & 0x3));                          // subnormal: exp field 0, mant k
 }
 
+// ---- FP6 E2M3 requant-output path (code1/altfmt1, 4-wide-via-LUT sibling of E3M2) ------------
+// BF16 bits -> 6-bit FP6 E2M3 code (sign5 | exp2(4:3,bias1) | man3(2:0)). Consistent with the
+// MxQuant golden (npu-exploration/MXQuant microxcaling fp6_e2m3): ebits=2, mbits=5 (3 mantissa),
+// emax=2, bias=1, max_norm=7.5, quantum 2^-3=0.125, subnormals encoded (allow_denorm), round-half-
+// to-even, saturate_normals. Verified bit-exact vs mx._quantize_elemwise (0/20000).
+inline uint8_t bf16_bits_to_fp6_e2m3_code(uint16_t bits) {
+  int sign = (bits >> 15) & 1;
+  int E8 = (bits >> 7) & 0xFF;
+  int M = bits & 0x7F;
+  int s5 = sign << 5;
+  if (E8 == 0 || E8 == 0xFF) return (uint8_t)s5;            // zero / bf16-subnormal / non-finite -> code 0
+  const int m_bits = 3, bias = 1, emax = 2;
+  float av = ldexpf(1.0f + (float)M / 128.0f, E8 - 127);    // exact bf16 magnitude
+  int Efl = (int)floorf(log2f(av));
+  int code;
+  if (Efl < 0) {
+    float quantum = ldexpf(1.0f, -m_bits);                 // 2^-3 = 0.125
+    int k = (int)nearbyintf(av / quantum);                 // round-half-to-even
+    if (k <= 0)                       code = s5;
+    else if (k >= (1 << m_bits))      code = s5 | (1 << m_bits);   // -> min normal (exp field 1, mant 0)
+    else                              code = s5 | k;               // subnormal (exp field 0, mant k)
+  } else {
+    int E_used = Efl > emax ? emax : Efl;
+    float base = ldexpf(1.0f, E_used);
+    float delta = base / (1 << m_bits);
+    int m = (int)nearbyintf((av - base) / delta);
+    if (m >= (1 << m_bits)) {                               // rounding carry (e.g. 3.75 -> 4.0)
+      E_used += 1; m = 0;
+      if (E_used > emax) { E_used = emax; m = (1 << m_bits) - 1; }  // saturate -> 7.5
+    } else {
+      if (m < 0) m = 0;
+      if (m > (1 << m_bits) - 1) m = (1 << m_bits) - 1;
+    }
+    int exp_field = E_used + bias;                          // unbiased 0->1, 1->2, 2->3
+    code = s5 | ((exp_field & 0x3) << m_bits) | (m & 0x7);
+  }
+  return (uint8_t)code;
+}
+
+// FP6 E2M3 6-bit code -> exact value * 8 as a signed integer (monotonic magnitude for nearest).
+// subnormal (exp field 0): m*2^-3 -> *8 = m. normal (field f in 1..3): (1+m/8)*2^(f-1) -> *8 = (8+m)<<(f-1).
+inline long long fp6_e2m3_to_fixed_point(uint8_t val) {
+  val &= 0x3F;
+  int sign = (val >> 5) & 1;
+  int exp  = (val >> 3) & 0x3;
+  int mant = val & 0x7;
+  long long mag = (exp == 0) ? (long long)mant : (long long)((8 + mant) << (exp - 1));
+  return sign ? -mag : mag;
+}
+
+// Nearest LUT-entry finder for E2M3 (exact-value distance, argmin, lower index wins). Matches the
+// golden reverse_lut_quantize (float argmin).
+inline int fp6e2m3_nearest_finder(uint8_t in_code, const uint8_t lut[16]) {
+  long long fixed_in = fp6_e2m3_to_fixed_point(in_code);
+  int best = 0;
+  long long best_d = 0;
+  for (int i = 0; i < 16; i++) {
+    long long f = fp6_e2m3_to_fixed_point(lut[i]);
+    long long d = fixed_in - f;
+    if (d < 0) d = -d;
+    if (i == 0 || d < best_d) { best_d = d; best = i; }
+  }
+  return best;
+}
+
 // BF16 -> E3M1 (RNE) -> E2M1 (deterministic map) -> 4-bit FP4 code, mirroring
 // fp4_matmul_model.py::hw_bf16_to_e2m1.
 inline uint8_t bf16_bits_to_fp4_e2m1_code(uint16_t bf16) {
