@@ -1445,11 +1445,9 @@ void gemmini_t::mx_loop_ws_spad(reg_t rs1, reg_t rs2) {
     if (out_e5m2 || out_e4m3_quad || out_e2m3 || out_e3m2) {
       const int GROUP_OUT = 32;
       const int N_blocks  = N_DIM / GROUP_OUT;
-      // log2_pmax = emax = 1<<(e_bits-1) for EVERY nibble/LUT output: E4M3-quad(e=4)->8, E5M2(e=5)->16,
-      // E2M3(e=2)->2, E3M2(e=3)->4. E4M3-quad follows the OCP emax convention like the other nibble outputs
-      // (NOT the FP8 _po2 pmax=0 -- that convention is only for the 8-bit E4M3-single direct path above).
-      // Matches the golden fp8_matmul_model.matrix_mx_requantize (log2_pmax = 1<<(e_bits-1)).
-      const int log2_pmax = out_e4m3_quad ? 8 : (out_e5m2 ? 16 : (out_e2m3 ? 2 : 4));
+      // log2_pmax = 0 (_po2 convention) for every nibble/LUT output so a chained requant result normalizes
+      // into [1,2) and stays within the next matmul's accumulator/finder range (was emax = 1<<(e_bits-1)).
+      const int log2_pmax = 0;
       const reg_t scale_dram = gemmini_state.mx_scale_dram;
       for (int m = 0; m < M_DIM; m++) {
         const size_t lut_idx = (size_t)(m >> G);
@@ -1577,7 +1575,7 @@ void gemmini_t::mx_loop_ws_spad(reg_t rs1, reg_t rs2) {
     if (gemmini_state.mx_out_fmt == 2) {
       const int GROUP_OUT = 32;
       const int N_blocks  = N_DIM / GROUP_OUT;
-      const int log2_pmax = 2;  // FP4 E2M1 emax (matches _fp_emax in fp4_matmul_model.py)
+      const int log2_pmax = 0;  // _po2 convention (was 2) so chained FP4 requant output stays in range
       const reg_t scale_dram = gemmini_state.mx_scale_dram;
       for (int m = 0; m < M_DIM; m++) {
         for (int bi = 0; bi < N_blocks; bi++) {
