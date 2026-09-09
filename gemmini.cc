@@ -458,7 +458,9 @@ void gemmini_t::config(reg_t rs1, reg_t rs2) {
 
     if (!set_only_strides) {
       gemmini_state.mx_use_lut = (rs1 >> 5) & 0x1;
-      gemmini_state.mx_fp8_altfmt = (rs1 >> 6) & 0x1;   // LUT holds 8-bit E5M2 codes (vs 6-bit FP6)
+      gemmini_state.mx_fp8_altfmt = (rs1 >> 6) & 0x1;   // activation (and output) sub-format alt select
+      // Per-operand weight altfmt: rs1 bit 31 XORs the activation altfmt (0 = same sub-format, default).
+      gemmini_state.mx_wgt_altfmt = ((rs1 >> 6) & 0x1) ^ ((rs1 >> 31) & 0x1);
       gemmini_state.mx_act_fmt = (rs1 >> 10) & 0x3;
       gemmini_state.mx_wgt_fmt = (rs1 >> 12) & 0x3;
       gemmini_state.mx_out_fmt = (rs1 >> 14) & 0x3;
@@ -1174,8 +1176,8 @@ void gemmini_t::mx_loop_ws_spad(reg_t rs1, reg_t rs2) {
     if (wgtf == 2) return fp4_e2m1_decode(nib);
     const int Gw = gemmini_state.mx_lut_update_granularity;
     const uint8_t code = gemmini_state.mx_lut_b[((size_t)(bcol >> Gw)) * 16 + nib];
-    if (wgtf == 0) return gemmini_state.mx_fp8_altfmt ? fp8_e5m2_decode(code) : fp8_e4m3_decode(code);
-    return gemmini_state.mx_fp8_altfmt ? fp6_e2m3_decode(code) : fp6_e3m2_decode(code);
+    if (wgtf == 0) return gemmini_state.mx_wgt_altfmt ? fp8_e5m2_decode(code) : fp8_e4m3_decode(code);
+    return gemmini_state.mx_wgt_altfmt ? fp6_e2m3_decode(code) : fp6_e3m2_decode(code);
   };
 
   const int prod_e = 4, prod_m = 3;

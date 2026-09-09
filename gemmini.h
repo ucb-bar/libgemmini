@@ -116,7 +116,8 @@ struct gemmini_state_t
   uint8_t mx_wgt_fmt;
   uint8_t mx_out_fmt;
   uint8_t mx_use_lut;
-  uint8_t mx_fp8_altfmt;   // config_ex rs1 bit 6: LUT holds 8-bit E5M2 codes (else 6-bit FP6)
+  uint8_t mx_fp8_altfmt;   // config_ex rs1 bit 6: activation (and output) sub-format alt select
+  uint8_t mx_wgt_altfmt;   // effective weight sub-format alt = mx_fp8_altfmt ^ rs1 bit 31 (per-operand)
   uint8_t mx_lut_en;       // G1: runtime LUT-usage flag (MX_LOAD_LUT sets, MX_LUT_DISABLE clears, default 0)
 
   uint64_t mx_scale_dram;
