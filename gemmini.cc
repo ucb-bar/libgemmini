@@ -1166,6 +1166,17 @@ void gemmini_t::mx_loop_ws_spad(reg_t rs1, reg_t rs2) {
   const uint16_t TK = gemmini_state.loop_ws_K;
   const uint32_t A_sp = gemmini_state.mx_loop_a_spad;
   const uint8_t actf = gemmini_state.mx_act_fmt;
+  const uint8_t wgtf = gemmini_state.mx_wgt_fmt;
+
+  // Decode a B (weight) nibble by the WEIGHT format, so act and weight may differ (asymmetric).
+  // wgtf==2: fp4 direct; else weight-LUT deproject (fp6 e3m2/e2m3, or fp8 e4m3/e5m2 by altfmt).
+  auto decode_B_nib = [&](uint8_t nib, int bcol) -> float {
+    if (wgtf == 2) return fp4_e2m1_decode(nib);
+    const int Gw = gemmini_state.mx_lut_update_granularity;
+    const uint8_t code = gemmini_state.mx_lut_b[((size_t)(bcol >> Gw)) * 16 + nib];
+    if (wgtf == 0) return gemmini_state.mx_fp8_altfmt ? fp8_e5m2_decode(code) : fp8_e4m3_decode(code);
+    return gemmini_state.mx_fp8_altfmt ? fp6_e2m3_decode(code) : fp6_e3m2_decode(code);
+  };
 
   const int prod_e = 4, prod_m = 3;
   const int8_t acc_e[16] = {4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,8};
@@ -1386,9 +1397,7 @@ void gemmini_t::mx_loop_ws_spad(reg_t rs1, reg_t rs2) {
             for (int n = 0; n < TN; n++) {
               uint8_t byte = (uint8_t)gemmini_state.spad.at(B_t + kk).at(n >> 1);
               uint8_t nib = (n & 1) ? ((byte >> 4) & 0xF) : (byte & 0xF);
-              const size_t lut_idx = (size_t)((j * TN + n) >> G);
-              const uint8_t code = gemmini_state.mx_lut_b[lut_idx * 16 + nib];
-              B_row[n] = lut_decode(code);
+              B_row[n] = decode_B_nib(nib, j * TN + n);
             }
             const int ae = acc_e[kk], am = acc_m[kk];
             for (int r = 0; r < TM; r++)
@@ -1529,7 +1538,7 @@ void gemmini_t::mx_loop_ws_spad(reg_t rs1, reg_t rs2) {
             for (int n = 0; n < TN; n++) {
               uint8_t byte = (uint8_t)gemmini_state.spad.at(B_t + kk).at(n >> 1);
               uint8_t nib = (n & 1) ? ((byte >> 4) & 0xF) : (byte & 0xF);
-              B_row[n] = fp4_e2m1_decode(nib);
+              B_row[n] = decode_B_nib(nib, j * TN + n);
             }
             const int ae = acc_e[kk], am = acc_m[kk];
             for (int r = 0; r < TM; r++)
