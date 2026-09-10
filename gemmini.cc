@@ -53,6 +53,7 @@ void gemmini_state_t::reset()
   mx_out_fmt = 0;
   mx_use_lut = 0;
   mx_lut_en = 0;   // G1: runtime LUT-usage flag (set by MX_LOAD_LUT, cleared by MX_LUT_DISABLE)
+  mx_lut_a_loaded = 0; mx_lut_b_loaded = 0;   // per-operand quad (deproject) flags
   mx_scale_dram = 0;
   mx_tiles_I = mx_tiles_J = mx_tiles_K = 0;
   mx_scale_act_sel = mx_scale_wgt_sel = 0;
@@ -1123,6 +1124,11 @@ void gemmini_t::mx_load_lut(reg_t rs1, reg_t rs2) {
   const reg_t dram_addr = rs1;
   const uint32_t num_luts = (uint32_t)(rs2 & 0xFFFFFFFFu);
   const uint8_t  sel      = (uint8_t)((rs2 >> 32) & 0x3);
+  // Per-operand quad detection: an ACT LUT (sel==1) means the activation is deprojected (quad); a WEIGHT
+  // LUT (sel==0) means the weight is deprojected (quad). This decouples each operand's single-vs-quad
+  // throughput from the global mx_lut_en, so E4M3-single x LUT-quad (dual throughput) selects correctly.
+  if (sel == 1) gemmini_state.mx_lut_a_loaded = 1;
+  else if (sel == 0) gemmini_state.mx_lut_b_loaded = 1;
   auto &dst = (sel == 1) ? gemmini_state.mx_lut_a
             : (sel == 2) ? gemmini_state.mx_lut_c
                          : gemmini_state.mx_lut_b;
@@ -1232,12 +1238,16 @@ void gemmini_t::mx_loop_ws_spad(reg_t rs1, reg_t rs2) {
     }
   };
 
-  if (actf == 0 && !gemmini_state.mx_fp8_altfmt && !gemmini_state.mx_lut_en) {
-    // Plain E4M3 (fp8, altfmt=0): direct 8-bit operands, single throughput (1 element/lane). E4M3-quad
-    // (lut_en) and E5M2 (altfmt=1, always lut) are handled by the LUT branch below.
+  if (actf == 0 && !gemmini_state.mx_fp8_altfmt && !gemmini_state.mx_lut_a_loaded) {
+    // E4M3-single ACTIVATION (direct 8-bit, 1 row/lane). The WEIGHT is single (E4M3 direct, 1 col/lane
+    // -> 16x16 tile) OR quad (fp4/fp6/E5M2 nibble-packed, 2 col/lane -> 16x32 tile). This is the
+    // single x quad "dual throughput" case (modes 6/7): TM=16 always (single act), TN=32 iff wgt quad.
+    const bool wgt_quad = (wgtf != 0) || gemmini_state.mx_wgt_altfmt;
+    const int TM = DIM;
+    const int TN = wgt_quad ? 32 : DIM;
     const uint32_t B_sp = gemmini_state.mx_loop_b_spad - (uint32_t)TK * TJ * DIM;
-    const int M_DIM = TI * DIM;
-    const int N_DIM = TJ * DIM;
+    const int M_DIM = TI * TM;
+    const int N_DIM = TJ * TN;
 
     for (uint16_t k_outer = 0; k_outer < TK; k_outer++) {
       const size_t group = (size_t)(k_outer * DIM) / GROUP;
@@ -1245,33 +1255,40 @@ void gemmini_t::mx_loop_ws_spad(reg_t rs1, reg_t rs2) {
         for (uint16_t i = 0; i < TI; i++) {
           const uint32_t A_t = A_sp + (i * TK + k_outer) * DIM;
           const uint32_t B_t = B_sp + (k_outer * TJ + j) * DIM;
-          std::vector<std::vector<float>> Ct(DIM, std::vector<float>(DIM, 0.0f));
+          std::vector<std::vector<float>> Ct(TM, std::vector<float>(TN, 0.0f));
           for (int kk = 0; kk < DIM; kk++) {
-            float A_col[16], B_row[16];
-            for (int r = 0; r < DIM; r++)
+            float A_col[16], B_row[32];
+            for (int r = 0; r < TM; r++)
               A_col[r] = fp8_e4m3_decode(gemmini_state.spad.at(A_t + r).at(kk));
-            for (int c = 0; c < DIM; c++)
-              B_row[c] = fp8_e4m3_decode(gemmini_state.spad.at(B_t + kk).at(c));
+            for (int c = 0; c < TN; c++) {
+              if (wgt_quad) {
+                uint8_t byte = (uint8_t)gemmini_state.spad.at(B_t + kk).at(c >> 1);
+                uint8_t nib  = (c & 1) ? ((byte >> 4) & 0xF) : (byte & 0xF);
+                B_row[c] = decode_B_nib(nib, j * TN + c);
+              } else {
+                B_row[c] = fp8_e4m3_decode(gemmini_state.spad.at(B_t + kk).at(c));
+              }
+            }
             const int ae = acc_e[kk], am = acc_m[kk];
-            for (int r = 0; r < DIM; r++)
-              for (int c = 0; c < DIM; c++) {
+            for (int r = 0; r < TM; r++)
+              for (int c = 0; c < TN; c++) {
                 float p  = mx_product_quantize_trunc(A_col[r] * B_row[c], prod_e, prod_m);
                 float Cq = fp_quantize_rne(Ct[r][c], ae, am);
                 float pq = fp_quantize_rne(p, ae, am);
                 Ct[r][c] = fp_add_exact(Cq, pq, ae, am);
               }
           }
-          for (int r = 0; r < DIM; r++)
-            for (int c = 0; c < DIM; c++) {
-              const size_t a_off = group * (size_t)M_DIM + (size_t)(i*DIM + r);
-              const size_t b_off = group * (size_t)N_DIM + (size_t)(j*DIM + c);
+          for (int r = 0; r < TM; r++)
+            for (int c = 0; c < TN; c++) {
+              const size_t a_off = group * (size_t)M_DIM + (size_t)(i*TM + r);
+              const size_t b_off = group * (size_t)N_DIM + (size_t)(j*TN + c);
               const uint8_t sa = (a_off < gemmini_state.mx_scale_a_mem.size()) ? gemmini_state.mx_scale_a_mem[a_off] : 0x7f;
               const uint8_t sb = (b_off < gemmini_state.mx_scale_b_mem.size()) ? gemmini_state.mx_scale_b_mem[b_off] : 0x7f;
               int e = (int)sa + (int)sb - 127;
               uint8_t s_code = (e < 0) ? 0 : (e > 254 ? 254 : (uint8_t)e);
               float s = fpe8m0_decode(s_code);
               float scaled = bf16_round(Ct[r][c] * s);
-              const size_t idx = smem_base + (size_t)(i*DIM + r) * N_DIM + (j*DIM + c);
+              const size_t idx = smem_base + (size_t)(i*TM + r) * N_DIM + (j*TN + c);
               if (idx >= gemmini_state.mx_smem.size()) continue;
               float prev = bf16_to_f32(gemmini_state.mx_smem[idx]);
               gemmini_state.mx_smem[idx] = f32_to_bf16_rne(bf16_accum_add(prev, scaled));
@@ -1366,11 +1383,13 @@ void gemmini_t::mx_loop_ws_spad(reg_t rs1, reg_t rs2) {
     return;
   }
 
-  if (actf == 1 || (actf == 0 && (gemmini_state.mx_lut_en || gemmini_state.mx_fp8_altfmt))) {
-    // LUT path (4-wide). A/B in spad are 4-bit LUT INDICES (nibble-packed). Symmetric encoding:
-    //   actf==0 (fp8): altfmt0 -> E4M3 (quad, needs lut_en); altfmt1 -> E5M2 (always lut).
-    //   actf==1 (fp6): altfmt0 -> E3M2;                       altfmt1 -> E2M3 (quad, lut-only).
-    const int TM = 32, TN = 32;
+  if (actf == 1 || (actf == 0 && (gemmini_state.mx_lut_a_loaded || gemmini_state.mx_fp8_altfmt))) {
+    // LUT path (4-wide) for the ACTIVATION (quad, 2 rows/lane). A in spad is 4-bit LUT indices. The
+    // WEIGHT is quad (nibble LUT indices, TN=32) OR E4M3-single (direct 8-bit, 1 col/lane, TN=16 ->
+    // 32x16 dual-throughput tile, modes 2/5). wgt_single = fp8/code0, altfmt0, no weight LUT loaded.
+    const bool wgt_single = (wgtf == 0) && !gemmini_state.mx_wgt_altfmt && !gemmini_state.mx_lut_b_loaded;
+    const int TM = 32;
+    const int TN = wgt_single ? DIM : 32;
     const uint32_t B_sp = gemmini_state.mx_loop_b_spad - (uint32_t)TK * TJ * DIM;
     const int M_DIM = TI * TM;
     const int N_DIM = TJ * TN;
@@ -1397,9 +1416,13 @@ void gemmini_t::mx_loop_ws_spad(reg_t rs1, reg_t rs2) {
               A_col[m] = lut_decode(code);
             }
             for (int n = 0; n < TN; n++) {
-              uint8_t byte = (uint8_t)gemmini_state.spad.at(B_t + kk).at(n >> 1);
-              uint8_t nib = (n & 1) ? ((byte >> 4) & 0xF) : (byte & 0xF);
-              B_row[n] = decode_B_nib(nib, j * TN + n);
+              if (wgt_single) {
+                B_row[n] = fp8_e4m3_decode((uint8_t)gemmini_state.spad.at(B_t + kk).at(n));
+              } else {
+                uint8_t byte = (uint8_t)gemmini_state.spad.at(B_t + kk).at(n >> 1);
+                uint8_t nib = (n & 1) ? ((byte >> 4) & 0xF) : (byte & 0xF);
+                B_row[n] = decode_B_nib(nib, j * TN + n);
+              }
             }
             const int ae = acc_e[kk], am = acc_m[kk];
             for (int r = 0; r < TM; r++)
@@ -1516,7 +1539,11 @@ void gemmini_t::mx_loop_ws_spad(reg_t rs1, reg_t rs2) {
   }
 
   if (actf == 2) {
-    const int TM = 32, TN = 32;
+    // FP4 ACTIVATION (quad, 2 rows/lane). WEIGHT is quad (nibble, TN=32) OR E4M3-single (direct 8-bit,
+    // TN=16 -> 32x16 dual-throughput tile, mode2). wgt_single = fp8/code0, altfmt0, no weight LUT.
+    const bool wgt_single = (wgtf == 0) && !gemmini_state.mx_wgt_altfmt && !gemmini_state.mx_lut_b_loaded;
+    const int TM = 32;
+    const int TN = wgt_single ? DIM : 32;
     const uint32_t B_sp = gemmini_state.mx_loop_b_spad - (uint32_t)TK * TJ * DIM;
     const int M_DIM = TI * TM;
     const int N_DIM = TJ * TN;
@@ -1536,9 +1563,13 @@ void gemmini_t::mx_loop_ws_spad(reg_t rs1, reg_t rs2) {
               A_col[m] = fp4_e2m1_decode(nib);
             }
             for (int n = 0; n < TN; n++) {
-              uint8_t byte = (uint8_t)gemmini_state.spad.at(B_t + kk).at(n >> 1);
-              uint8_t nib = (n & 1) ? ((byte >> 4) & 0xF) : (byte & 0xF);
-              B_row[n] = decode_B_nib(nib, j * TN + n);
+              if (wgt_single) {
+                B_row[n] = fp8_e4m3_decode((uint8_t)gemmini_state.spad.at(B_t + kk).at(n));
+              } else {
+                uint8_t byte = (uint8_t)gemmini_state.spad.at(B_t + kk).at(n >> 1);
+                uint8_t nib = (n & 1) ? ((byte >> 4) & 0xF) : (byte & 0xF);
+                B_row[n] = decode_B_nib(nib, j * TN + n);
+              }
             }
             const int ae = acc_e[kk], am = acc_m[kk];
             for (int r = 0; r < TM; r++)
@@ -2213,6 +2244,7 @@ reg_t gemmini_t::CUSTOMFN(XCUSTOM_ACC)(rocc_insn_t insn, reg_t xs1, reg_t xs2) {
     mx_load_lut(xs1, xs2);
   } else if (insn.funct == mx_lut_disable_funct) {
     gemmini_state.mx_lut_en = 0;   // G1: clear runtime LUT-usage flag
+    gemmini_state.mx_lut_a_loaded = 0; gemmini_state.mx_lut_b_loaded = 0;
   } else if (insn.funct == loop_conv_ws_config_1_funct) {
     loop_conv_ws_config_1(xs1, xs2);
   } else if (insn.funct == loop_conv_ws_config_2_funct) {

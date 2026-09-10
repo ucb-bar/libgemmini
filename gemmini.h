@@ -119,6 +119,8 @@ struct gemmini_state_t
   uint8_t mx_fp8_altfmt;   // config_ex rs1 bit 6: activation (and output) sub-format alt select
   uint8_t mx_wgt_altfmt;   // effective weight sub-format alt = mx_fp8_altfmt ^ rs1 bit 31 (per-operand)
   uint8_t mx_lut_en;       // G1: runtime LUT-usage flag (MX_LOAD_LUT sets, MX_LUT_DISABLE clears, default 0)
+  uint8_t mx_lut_a_loaded; // per-operand: an ACTIVATION LUT (sel==1) was loaded -> act is quad (deprojected)
+  uint8_t mx_lut_b_loaded; // per-operand: a WEIGHT LUT (sel==0) was loaded -> wgt is quad (deprojected)
 
   uint64_t mx_scale_dram;
   uint16_t mx_tiles_I, mx_tiles_J, mx_tiles_K;
