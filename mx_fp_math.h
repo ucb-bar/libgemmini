@@ -190,15 +190,6 @@ inline float bf16_accum_add(float x, float y) {
   return fp_add_exact(bf16_round(x), bf16_round(y), 8, 7);
 }
 
-// Round half AWAY FROM ZERO, which is what the MX reference does: microxcaling's
-// _quantize_elemwise(round="nearest") moves ties away from zero, not to even (measured:
-// 0.5*2^-9 -> 1*2^-9, 1.0625 -> 1.125, -1.0625 -> -1.125). Every caller below passes a
-// non-negative magnitude, so "away from zero" is "up".
-inline int round_half_away(float x) {
-  float fl = floorf(x);
-  return (int)fl + ((x - fl) >= 0.5f ? 1 : 0);
-}
-
 // E4M3 NaN code (exp=1111, mant=111), reserved as the out-of-band "input was not finite" signal.
 static const uint8_t FP8_E4M3_NAN = 0x7F;
 
@@ -216,9 +207,9 @@ inline uint8_t fp8_e4m3_to_code(float v) {
   int emin = -6;
   int emax = 8;
   if (E < emin) {
-    // Subnormal range [2^-9, 2^-6): quantum = 2^(emin - m_bits) = 2^-9
+    // Subnormal range [2^-9, 2^-6): quantum = 2^(emin - m_bits) = 2^-9. RNE (OCP round='even').
     float quantum = ldexpf(1.0f, emin - 3);
-    int k = round_half_away(av / quantum);
+    int k = (int)nearbyintf(av / quantum);
     // Underflow keeps its SIGN: the reference returns -0.0 for a negative value that rounds to
     // zero (only a -0.0 *input* is canonicalized to +0.0, by the v == 0 test above).
     if (k <= 0) return (uint8_t)(s << 7);
@@ -230,7 +221,7 @@ inline uint8_t fp8_e4m3_to_code(float v) {
   else {
     float base = ldexpf(1.0f, E_used);
     float delta = base / 8.0f;
-    int k = round_half_away((av - base) / delta);
+    int k = (int)nearbyintf((av - base) / delta);
     if (k >= 8) { E_used += 1; k = 0; if (E_used > emax) { E_used = emax; k = 6; } }
     else { int hi = (E_used == emax) ? 6 : 7; if (k > hi) k = hi; if (k < 0) k = 0; }
     mant = k;
@@ -292,75 +283,42 @@ inline float fp6_e2m3_decode(uint8_t code) {
   return s ? -val : val;
 }
 
-// BF16 bits -> E4M2 float (RNE), matches lut_mapping_demo._bf16_to_e4m2_rne.
-inline float bf16_bits_to_e4m2_rne(uint16_t bits) {
-  int sign_bit = (bits >> 15) & 1;
-  int E = (bits >> 7) & 0xFF;
-  int M = bits & 0x7F;
-  if (E == 0) return 0.0f;
-  if (E == 255) return sign_bit ? -INFINITY : INFINITY;
-  int e = E - 127;
-  float sign_f = sign_bit ? -1.0f : 1.0f;
-  if (e >= -6 && e <= 7) {
-    int q = (M >> 5) & 3;
-    int r = (M >> 4) & 1;
-    int sticky = (M & 0xF) != 0;
-    int lsb = (M >> 5) & 1;
-    int round_up = r & (sticky | lsb);
-    int sig_rounded = q + round_up;
-    int carry = sig_rounded >= 4;
-    int mant_out = carry ? 0 : sig_rounded;
-    int exp_out  = carry ? e + 1 : e;
-    if (exp_out > 7) return sign_f * INFINITY;
-    return sign_f * (1.0f + mant_out * 0.25f) * ldexpf(1.0f, exp_out);
-  }
-  if (e == -7) { int k = (M <= 32) ? 2 : ((M <= 95) ? 3 : 4); return sign_f * (float)k * (1.0f / 256.0f); }
-  if (e == -8) { int k = (M < 64) ? 1 : 2; return sign_f * (float)k * (1.0f / 256.0f); }
-  if (e == -9) { int k = (M == 0) ? 0 : 1; return sign_f * (float)k * (1.0f / 256.0f); }
-  return 0.0f;
-}
-
-// Deterministic E4M2 float -> FP6 float (matches _e4m2_to_fp6).
-inline float e4m2_to_fp6_float(float x) {
-  float sign = (x < 0.0f) ? -1.0f : 1.0f;
-  float ax = fabsf(x);
-  if (!std::isfinite(ax) || ax >= 32.0f) return sign * 28.0f;
-  if (ax <= 0.0546875f) return 0.0f;
-  if (ax >= 0.0625f && ax <= 0.21875f) {
-    float sub = (ax <= 0.078125f) ? 0.0625f
-              : (ax <= 0.15625f)  ? 0.125f
-                                  : 0.1875f;
-    return sign * sub;
-  }
-  return x;
-}
-
-// FP6 grid float -> 6-bit FP6 E3M2 code (matches _fp6_value_to_code).
-inline uint8_t fp6_value_to_code(float v) {
-  if (v == 0.0f) return 0;
-  int s = (v < 0.0f) ? 1 : 0;
-  float av = fabsf(v);
-  const int e_bits = 3, m_bits = 2, bias = 3;
-  if (av < 0.25f) {  // 2^(1-bias) = 2^-2
-    float quantum = 0.0625f;
-    int mant = (int)lroundf(av / quantum);
-    if (mant < 0) mant = 0;
-    if (mant > (1 << m_bits) - 1) mant = (1 << m_bits) - 1;
-    return (uint8_t)((s << (e_bits + m_bits)) | mant);
-  }
-  int E = (int)floorf(log2f(av));
-  float base = ldexpf(1.0f, E);
-  int mant = (int)lroundf((av - base) / (base / 4.0f));
-  if (mant >= 4) { mant = 0; E += 1; }
-  int biased = E + bias;
-  if (biased > (1 << e_bits) - 1) biased = (1 << e_bits) - 1;
-  if (mant > (1 << m_bits) - 1) mant = (1 << m_bits) - 1;
-  return (uint8_t)((s << (e_bits + m_bits)) | (biased << m_bits) | mant);
-}
-
-// BF16 bits -> 6-bit FP6 E3M2 code (full HW pipeline).
+// BF16 bits -> 6-bit FP6 E3M2 code (sign5 | exp3(4:2,bias3) | man2(1:0)). Rounds STRAIGHT to the
+// E3M2 grid, RNE (OCP round='even'), subnormals kept (allow_denorm). Matches mx._quantize_elemwise
+// (fp6_e3m2, round='even'). Sibling of bf16_bits_to_fp6_e2m3_code: ebits=3, mbits=2, emin=-2,
+// emax=4, bias=3, max_norm=28, subnormal quantum 2^(emin-mbits)=2^-4.
 inline uint8_t bf16_bits_to_fp6_e3m2_code(uint16_t bits) {
-  return fp6_value_to_code(e4m2_to_fp6_float(bf16_bits_to_e4m2_rne(bits)));
+  int sign = (bits >> 15) & 1;
+  int E8 = (bits >> 7) & 0xFF;
+  int M = bits & 0x7F;
+  int s5 = sign << 5;
+  if (E8 == 0 || E8 == 0xFF) return (uint8_t)s5;             // zero / bf16-subnormal / non-finite -> 0
+  const int m_bits = 2, bias = 3, emin = -2, emax = 4;
+  float av = ldexpf(1.0f + (float)M / 128.0f, E8 - 127);     // exact bf16 magnitude
+  int Efl = (int)floorf(log2f(av));
+  int code;
+  if (Efl < emin) {
+    float quantum = ldexpf(1.0f, emin - m_bits);             // 2^-4 = 0.0625
+    int k = (int)nearbyintf(av / quantum);                   // RNE
+    if (k <= 0)                       code = s5;
+    else if (k >= (1 << m_bits))      code = s5 | (1 << m_bits);   // -> min normal (exp field 1, mant 0)
+    else                              code = s5 | k;               // subnormal (exp field 0, mant k)
+  } else {
+    int E_used = Efl > emax ? emax : Efl;
+    float base = ldexpf(1.0f, E_used);
+    float delta = base / (1 << m_bits);
+    int m = (int)nearbyintf((av - base) / delta);
+    if (m >= (1 << m_bits)) {                                 // rounding carry (e.g. 3.5*base -> next exp)
+      E_used += 1; m = 0;
+      if (E_used > emax) { E_used = emax; m = (1 << m_bits) - 1; }  // saturate -> 28.0
+    } else {
+      if (m < 0) m = 0;
+      if (m > (1 << m_bits) - 1) m = (1 << m_bits) - 1;
+    }
+    int exp_field = E_used + bias;                            // unbiased -2->1 ... 4->7
+    code = s5 | ((exp_field & 0x7) << m_bits) | (m & 0x3);
+  }
+  return (uint8_t)code;
 }
 
 // FP6 6-bit code -> 9-bit signed fixed-point (mirrors FP6E3M2NearestFinder.scala).
@@ -506,7 +464,7 @@ inline uint8_t bf16_bits_to_e5m2_code(uint16_t bits) {
   if (e >= -14 && e <= 15) {               // E5M2 normal range
     int q       = (M >> 5) & 0x3;          // top 2 mantissa bits
     int r       = (M >> 4) & 1;            // round bit
-    int round_up = r;                      // round half away from zero (matches golden + BF16ToE4M3)
+    int round_up = r & (((M & 0xF) != 0) | (q & 1));  // RNE (OCP round='even'): tie -> even
     int sig     = q + round_up;            // 0..4
     int carry   = sig >> 2;
     int mant    = carry ? 0 : sig;
@@ -525,7 +483,7 @@ inline uint8_t bf16_bits_to_e5m2_code(uint16_t bits) {
     int rem = sig8 & ((1 << shift) - 1);
     int half = 1 << (shift - 1);
     k = sig8 >> shift;
-    if (rem >= half) k += 1;                                 // round half away from zero
+    if (rem > half || (rem == half && (k & 1))) k += 1;      // RNE (OCP round='even'): tie -> even
   }
   if (k <= 0) return (uint8_t)s7;                            // -> signed zero
   if (k >= 4) return (uint8_t)(s7 | (1 << 2));               // rounds up to min normal (0x04)
