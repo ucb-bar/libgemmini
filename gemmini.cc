@@ -1166,7 +1166,10 @@ void gemmini_t::mx_loop_ws_spad(reg_t rs1, reg_t rs2) {
   // C8.3: mx_loop_scale_resident is no longer sourced here (rs2 bit11). It now comes from
   // gemmini_mxquant_config_mvout rs1 bit 62 (see mxquant_config_mvout), so the RTL requantizer
   // can see the same flag on the scale-config path. rs2 bit11 is left free.
-  (void)rs1;
+  // rs1 bit 0 is `ex_accumulate`, exactly as in the stock loop_ws (:712). Every caller already
+  // passes it -- gemmini_loop_ws_spad's macro ends `| ((full_C) << 1) | (ex_accumulate)` -- but this
+  // handler used to discard rs1 wholesale, so the MX path ALWAYS accumulated.
+  const bool ex_accumulate = rs1 & 1;
 
   const uint32_t C_spad = (uint32_t)((rs2 >> 32) & 0xFFFFFFFFu);
   const uint16_t TI = gemmini_state.loop_ws_I;
@@ -1191,6 +1194,23 @@ void gemmini_t::mx_loop_ws_spad(reg_t rs1, reg_t rs2) {
   const int8_t acc_m[16] = {4,4,4,4,4,4,4,4,5,5,6,6,6,6,6,7};
   const int GROUP = 32;
   const size_t smem_base = (size_t)C_spad * DIM;
+
+  // Stock loop_ws drops the accumulator's accumulate bit on the first k-tile when the caller asked
+  // to overwrite (`if (!ex_accumulate && k == 0)`, :848), which is what lets a C region be reused.
+  // The MX path had no equivalent: it did `smem[idx] = bf16_accum_add(prev, scaled)` unconditionally,
+  // so every matmul added to whatever that region already held. That forced callers to keep each C
+  // region disjoint for the whole life of the program -- and silently corrupted any that reused one,
+  // since mvout frees the SPAD rows but never touches this shadow accumulator. Honour the bit here.
+  // Zeroing the region up front is equivalent to the per-tile guard and costs one pass.
+  auto clear_smem_if_overwrite = [&](int M_out, int N_out) {
+    if (ex_accumulate) return;
+    const size_t n = (size_t)M_out * (size_t)N_out;
+    for (size_t w = 0; w < n; w++) {
+      const size_t idx = smem_base + w;
+      if (idx >= gemmini_state.mx_smem.size()) break;
+      gemmini_state.mx_smem[idx] = 0;
+    }
+  };
 
   // Internal-spad model (standalone MxGemminiRocket): deposit the MX output (already computed into
   // mx_smem, row-major) into the normal scratchpad at C_spad so a regular mvout drains it -- same as
@@ -1248,6 +1268,7 @@ void gemmini_t::mx_loop_ws_spad(reg_t rs1, reg_t rs2) {
     const uint32_t B_sp = gemmini_state.mx_loop_b_spad - (uint32_t)TK * TJ * DIM;
     const int M_DIM = TI * TM;
     const int N_DIM = TJ * TN;
+    clear_smem_if_overwrite(M_DIM, N_DIM);
 
     for (uint16_t k_outer = 0; k_outer < TK; k_outer++) {
       const size_t group = (size_t)(k_outer * DIM) / GROUP;
@@ -1393,6 +1414,7 @@ void gemmini_t::mx_loop_ws_spad(reg_t rs1, reg_t rs2) {
     const uint32_t B_sp = gemmini_state.mx_loop_b_spad - (uint32_t)TK * TJ * DIM;
     const int M_DIM = TI * TM;
     const int N_DIM = TJ * TN;
+    clear_smem_if_overwrite(M_DIM, N_DIM);
     const int G = gemmini_state.mx_lut_update_granularity;
     // Decode by (code, altfmt): fp8 -> altfmt? E5M2 : E4M3 ; fp6 -> altfmt? E2M3 : E3M2.
     float (*lut_decode)(uint8_t) = (actf == 0)
@@ -1547,6 +1569,7 @@ void gemmini_t::mx_loop_ws_spad(reg_t rs1, reg_t rs2) {
     const uint32_t B_sp = gemmini_state.mx_loop_b_spad - (uint32_t)TK * TJ * DIM;
     const int M_DIM = TI * TM;
     const int N_DIM = TJ * TN;
+    clear_smem_if_overwrite(M_DIM, N_DIM);
 
     for (uint16_t k_outer = 0; k_outer < TK; k_outer++) {
       const size_t group = (size_t)(k_outer * DIM) / GROUP;
