@@ -10,7 +10,13 @@
 
 using namespace std;
 
+// DIM=16 builds register as "gemmini" (libgemmini.so); DIM=32 builds register as
+// "gemmini_dim32" (libgemmini_dim32.so) so both meshes coexist as spike extensions.
+#if GEMMINI_DIM == 32
+REGISTER_EXTENSION(gemmini_dim32, []() { return new gemmini_t; })
+#else
 REGISTER_EXTENSION(gemmini, []() { return new gemmini_t; })
+#endif
 
 #define dprintf(...) { if (p->get_log_commits_enabled()) printf(__VA_ARGS__); }
 
@@ -1190,8 +1196,15 @@ void gemmini_t::mx_loop_ws_spad(reg_t rs1, reg_t rs2) {
   };
 
   const int prod_e = 4, prod_m = 3;
-  const int8_t acc_e[16] = {4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,8};
-  const int8_t acc_m[16] = {4,4,4,4,4,4,4,4,5,5,6,6,6,6,6,7};
+  // Mesh acc precision ramp, matching ConfigsFP dim{16,32}MxFPConfig meshAccPrecisionList
+  // (Python frac = Scala sig-1). Lanes 0-15 = the dim16 ramp; lanes 16+ = bf16 (8,7).
+  int8_t acc_e[DIM], acc_m[DIM];
+  for (int kk = 0; kk < DIM; kk++) {
+    if      (kk < 8)  { acc_e[kk] = 4; acc_m[kk] = 4; }
+    else if (kk < 10) { acc_e[kk] = 4; acc_m[kk] = 5; }
+    else if (kk < 15) { acc_e[kk] = 4; acc_m[kk] = 6; }
+    else              { acc_e[kk] = 8; acc_m[kk] = 7; }
+  }
   const int GROUP = 32;
   const size_t smem_base = (size_t)C_spad * DIM;
 
@@ -1264,7 +1277,7 @@ void gemmini_t::mx_loop_ws_spad(reg_t rs1, reg_t rs2) {
     // single x quad "dual throughput" case (modes 6/7): TM=16 always (single act), TN=32 iff wgt quad.
     const bool wgt_quad = (wgtf != 0) || gemmini_state.mx_wgt_altfmt;
     const int TM = DIM;
-    const int TN = wgt_quad ? 32 : DIM;
+    const int TN = wgt_quad ? 2*DIM : DIM;
     const uint32_t B_sp = gemmini_state.mx_loop_b_spad - (uint32_t)TK * TJ * DIM;
     const int M_DIM = TI * TM;
     const int N_DIM = TJ * TN;
@@ -1278,7 +1291,7 @@ void gemmini_t::mx_loop_ws_spad(reg_t rs1, reg_t rs2) {
           const uint32_t B_t = B_sp + (k_outer * TJ + j) * DIM;
           std::vector<std::vector<float>> Ct(TM, std::vector<float>(TN, 0.0f));
           for (int kk = 0; kk < DIM; kk++) {
-            float A_col[16], B_row[32];
+            float A_col[DIM], B_row[2*DIM];
             for (int r = 0; r < TM; r++)
               A_col[r] = fp8_e4m3_decode(gemmini_state.spad.at(A_t + r).at(kk));
             for (int c = 0; c < TN; c++) {
@@ -1409,8 +1422,8 @@ void gemmini_t::mx_loop_ws_spad(reg_t rs1, reg_t rs2) {
     // WEIGHT is quad (nibble LUT indices, TN=32) OR E4M3-single (direct 8-bit, 1 col/lane, TN=16 ->
     // 32x16 dual-throughput tile, modes 2/5). wgt_single = fp8/code0, altfmt0, no weight LUT loaded.
     const bool wgt_single = (wgtf == 0) && !gemmini_state.mx_wgt_altfmt && !gemmini_state.mx_lut_b_loaded;
-    const int TM = 32;
-    const int TN = wgt_single ? DIM : 32;
+    const int TM = 2*DIM;
+    const int TN = wgt_single ? DIM : 2*DIM;
     const uint32_t B_sp = gemmini_state.mx_loop_b_spad - (uint32_t)TK * TJ * DIM;
     const int M_DIM = TI * TM;
     const int N_DIM = TJ * TN;
@@ -1429,7 +1442,7 @@ void gemmini_t::mx_loop_ws_spad(reg_t rs1, reg_t rs2) {
           const uint32_t B_t = B_sp + (k_outer * TJ + j) * DIM;
           std::vector<std::vector<float>> Ct(TM, std::vector<float>(TN, 0.0f));
           for (int kk = 0; kk < DIM; kk++) {
-            float A_col[32], B_row[32];
+            float A_col[2*DIM], B_row[2*DIM];
             for (int m = 0; m < TM; m++) {
               uint8_t byte = (uint8_t)gemmini_state.spad.at(A_t + (m >> 1)).at(kk);
               uint8_t nib = (m & 1) ? ((byte >> 4) & 0xF) : (byte & 0xF);
@@ -1564,8 +1577,8 @@ void gemmini_t::mx_loop_ws_spad(reg_t rs1, reg_t rs2) {
     // FP4 ACTIVATION (quad, 2 rows/lane). WEIGHT is quad (nibble, TN=32) OR E4M3-single (direct 8-bit,
     // TN=16 -> 32x16 dual-throughput tile, mode2). wgt_single = fp8/code0, altfmt0, no weight LUT.
     const bool wgt_single = (wgtf == 0) && !gemmini_state.mx_wgt_altfmt && !gemmini_state.mx_lut_b_loaded;
-    const int TM = 32;
-    const int TN = wgt_single ? DIM : 32;
+    const int TM = 2*DIM;
+    const int TN = wgt_single ? DIM : 2*DIM;
     const uint32_t B_sp = gemmini_state.mx_loop_b_spad - (uint32_t)TK * TJ * DIM;
     const int M_DIM = TI * TM;
     const int N_DIM = TJ * TN;
@@ -1579,7 +1592,7 @@ void gemmini_t::mx_loop_ws_spad(reg_t rs1, reg_t rs2) {
           const uint32_t B_t = B_sp + (k_outer * TJ + j) * DIM;
           std::vector<std::vector<float>> Ct(TM, std::vector<float>(TN, 0.0f));
           for (int kk = 0; kk < DIM; kk++) {
-            float A_col[32], B_row[32];
+            float A_col[2*DIM], B_row[2*DIM];
             for (int m = 0; m < TM; m++) {
               uint8_t byte = (uint8_t)gemmini_state.spad.at(A_t + (m >> 1)).at(kk);
               uint8_t nib = (m & 1) ? ((byte >> 4) & 0xF) : (byte & 0xF);

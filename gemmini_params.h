@@ -5,7 +5,10 @@
 #include <limits.h>
 
 #define XCUSTOM_ACC 3
-#define DIM 16
+#ifndef GEMMINI_DIM
+#define GEMMINI_DIM 16
+#endif
+#define DIM GEMMINI_DIM
 #define ADDR_LEN 32
 #define BANK_NUM 4
 #define BANK_ROWS 4096
