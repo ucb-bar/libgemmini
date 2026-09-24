@@ -14,6 +14,8 @@ using namespace std;
 // "gemmini_dim32" (libgemmini_dim32.so) so both meshes coexist as spike extensions.
 #if GEMMINI_DIM == 32
 REGISTER_EXTENSION(gemmini_dim32, []() { return new gemmini_t; })
+#elif GEMMINI_DIM == 8
+REGISTER_EXTENSION(gemmini_dim8, []() { return new gemmini_t; })
 #else
 REGISTER_EXTENSION(gemmini, []() { return new gemmini_t; })
 #endif
@@ -1200,10 +1202,14 @@ void gemmini_t::mx_loop_ws_spad(reg_t rs1, reg_t rs2) {
   // (Python frac = Scala sig-1). Lanes 0-15 = the dim16 ramp; lanes 16+ = bf16 (8,7).
   int8_t acc_e[DIM], acc_m[DIM];
   for (int kk = 0; kk < DIM; kk++) {
+#if GEMMINI_DIM == 8
+    acc_e[kk] = 8; acc_m[kk] = 7;   // DIM=8: ALL rows bf16 (design assumption -- no reduced-precision ramp)
+#else
     if      (kk < 8)  { acc_e[kk] = 4; acc_m[kk] = 4; }
     else if (kk < 10) { acc_e[kk] = 4; acc_m[kk] = 5; }
     else if (kk < 15) { acc_e[kk] = 4; acc_m[kk] = 6; }
     else              { acc_e[kk] = 8; acc_m[kk] = 7; }
+#endif
   }
   const int GROUP = 32;
   const size_t smem_base = (size_t)C_spad * DIM;

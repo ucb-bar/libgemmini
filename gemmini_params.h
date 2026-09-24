@@ -11,7 +11,13 @@
 #define DIM GEMMINI_DIM
 #define ADDR_LEN 32
 #define BANK_NUM 4
+#if GEMMINI_DIM == 8
+// DIM=8 test-side BANK_ROWS = 65536/DIM = 8192, so b_base = BANK_NUM*BANK_ROWS = 32768 -- the model
+// scratchpad (sized BANK_NUM*BANK_ROWS/DIM matrices) must be at least that big.
+#define BANK_ROWS 8192
+#else
 #define BANK_ROWS 4096
+#endif
 #define ACC_ROWS 1024
 #define MAX_BYTES 64
 #define MAX_BLOCK_LEN (MAX_BYTES/(DIM*1))
