@@ -60,6 +60,7 @@ inline float mx_product_quantize_trunc(float x, int e_bits, int frac_bits) {
   int e;
   float m = frexpf(fabsf(x), &e);
   int E = e - 1;
+  if (E < -16) return 0.0f;   // MxFPMul PROD_FLOOR: products below 2^-16 flush to zero
   float scale = (float)(1 << frac_bits);
   float frac = 2.0f * m - 1.0f;
   float frac_q = floorf(frac * scale) / scale;
