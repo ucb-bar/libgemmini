@@ -1,5 +1,6 @@
 #include "gemmini.h"
 #include "mx_fp_math.h"
+#include "../gemmini-rocc-tests/include/vpu_ref.h"   // bit-exact VPU reference (shared with the tests)
 #include <riscv/mmu.h>
 #include <riscv/trap.h>
 #include <stdexcept>
@@ -7,6 +8,8 @@
 #include <assert.h>
 #include <math.h>
 #include <cfloat>
+#include <array>
+#include <vector>
 
 using namespace std;
 
@@ -1106,6 +1109,91 @@ void gemmini_t::mxquant_config_mvout(reg_t rs1, reg_t rs2) {
   gemmini_state.mx_lut_update_granularity = rs2 & 0xFFFF;
 }
 
+// VPU_EXEC (MxE4M3VpuGemminiRocketConfig): rs1 = src1[13:0] | src2[27:14] | dst[41:28] | rows[57:42],
+// rs2 = op[3:0] | bcast[4] | rlen[14:5] | imm[31:16]. Spad row = DIM bytes = 8 LE BF16 lanes. Inputs are read
+// before any output is written (the RTL reads several rows ahead of its writes), addresses wrap at 14 bits.
+void gemmini_t::vpu_exec(reg_t rs1, reg_t rs2) {
+  const uint32_t src1 = rs1 & 0x3FFF, src2 = (rs1 >> 14) & 0x3FFF, dst = (rs1 >> 28) & 0x3FFF;
+  const int rows = (int)((rs1 >> 42) & 0xFFFF);
+  const int op = (int)(rs2 & 0xF), bcast = (int)((rs2 >> 4) & 1);
+  int rlen = (int)((rs2 >> 5) & 0x3FF);
+  const uint16_t imm = (uint16_t)((rs2 >> 16) & 0xFFFF);
+  if (DIM != 2 * VPU_LANES) { fprintf(stderr, "VPU_EXEC: needs DIM=16 (8 BF16 per spad row)\n"); abort(); }
+  if (op > VPU_RAMAX) { fprintf(stderr, "VPU_EXEC: illegal op %d\n", op); abort(); }
+  if (rows == 0) return;
+  if (rlen == 0) rlen = 1024;   // RTL row-in-group counter is 10 bits
+  if (gemmini_state.spad.size() < 0x4000) gemmini_state.spad.resize(0x4000, std::vector<elem_t>(DIM, 0));
+  auto rd = [&](uint32_t addr, uint16_t *v) {
+    const auto &r = gemmini_state.spad[addr & 0x3FFF];
+    for (int l = 0; l < VPU_LANES; l++) v[l] = (uint16_t)((uint8_t)r[2 * l] | ((uint8_t)r[2 * l + 1] << 8));
+  };
+  const int n2 = bcast ? (rows + rlen - 1) / rlen : rows;
+  std::vector<std::array<uint16_t, VPU_LANES>> a(rows), b(op <= VPU_MUL ? n2 : 0), o(rows);
+  for (int i = 0; i < rows; i++) rd(src1 + i, a[i].data());
+  for (int i = 0; i < (int)b.size(); i++) rd(src2 + i, b[i].data());
+  vpu_ref_exec(op, (uint16_t (*)[VPU_LANES])o.data(), (const uint16_t (*)[VPU_LANES])a.data(),
+               b.empty() ? nullptr : (const uint16_t (*)[VPU_LANES])b.data(), rows, rlen, bcast, imm);
+  const int nout = op >= VPU_RMAX ? rows / rlen : rows;
+  for (int i = 0; i < nout; i++) {
+    auto &r = gemmini_state.spad[(dst + i) & 0x3FFF];
+    for (int l = 0; l < VPU_LANES; l++) { r[2 * l] = (elem_t)(o[i][l] & 0xFF); r[2 * l + 1] = (elem_t)(o[i][l] >> 8); }
+  }
+}
+
+// SPAD_REQUANT: rs1 = src[13:0] | dst[27:14] | tiled[28] | resident[29] | scale DRAM[62:30], rs2 = M[15:0] | N[31:16].
+// Row-major BF16 tile in the spad -> E4M3 codes (flat or operand-A tiled) + one E8M0 per 32 values along a row, filed
+// row-major to the command's scale DRAM address and, when resident, transposed [GN][M] into the act-scale window.
+// Same block scale / element encoding as the matmul requant golden.
+void gemmini_t::spad_requant(reg_t rs1, reg_t rs2) {
+  const uint32_t src = rs1 & 0x3FFF, dst = (rs1 >> 14) & 0x3FFF;
+  const bool tiled = (rs1 >> 28) & 1;
+  const bool resident = (rs1 >> 29) & 1;
+  const reg_t scale_dram = (rs1 >> 30) & 0x1FFFFFFFFULL;
+  const int M = (int)(rs2 & 0xFFFF), N = (int)((rs2 >> 16) & 0xFFFF);
+  if (DIM != 16 || N % 32 != 0 || M % 8 != 0 || ((M * (N / 32)) % 32) != 0 || M * (N / 32) > 2048) {
+    fprintf(stderr, "SPAD_REQUANT: needs DIM=16, N%%32==0, M%%8==0, M*N/32 a multiple of 32 and <= 2048\n");
+    abort();
+  }
+  if (gemmini_state.spad.size() < 0x4000) gemmini_state.spad.resize(0x4000, std::vector<elem_t>(DIM, 0));
+  const int GN = N / 32;
+  for (int m = 0; m < M; m++)
+    for (int b = 0; b < GN; b++) {
+      const uint32_t blk = (uint32_t)(m * GN + b);
+      float v[32];
+      for (int k = 0; k < 32; k++) {
+        const auto &row = gemmini_state.spad[(src + 4 * blk + k / 8) & 0x3FFF];
+        const int l = k % 8;
+        v[k] = mx::bf16_to_f32((uint16_t)((uint8_t)row[2 * l] | ((uint8_t)row[2 * l + 1] << 8)));
+      }
+      float max_abs = 0.0f; bool has_nan = false, has_inf = false;
+      for (int k = 0; k < 32; k++) {
+        if (std::isnan(v[k])) { has_nan = true; continue; }
+        if (std::isinf(v[k])) { has_inf = true; continue; }
+        if (fabsf(v[k]) > max_abs) max_abs = fabsf(v[k]);
+      }
+      uint8_t scale_code; float scale;
+      if (has_nan || has_inf) { scale_code = 0xFF; scale = has_nan ? (float)NAN : (float)INFINITY; }
+      else {
+        const float amax = (max_abs < FLT_EPSILON) ? FLT_EPSILON : max_abs;
+        int s = (int)floorf(log2f(amax)) + 127;
+        scale_code = (uint8_t)(s < 0 ? 0 : s > 254 ? 254 : s);
+        scale = ldexpf(1.0f, (int)scale_code - 127);
+      }
+      p->get_mmu()->store<uint8_t>(scale_dram + blk, scale_code);
+      if (resident) {
+        const size_t a_off = (size_t)b * (size_t)M + (size_t)m;
+        if (a_off >= gemmini_state.mx_scale_a_mem.size()) gemmini_state.mx_scale_a_mem.resize(a_off + 1, 0x7f);
+        gemmini_state.mx_scale_a_mem[a_off] = scale_code;
+      }
+      for (int h = 0; h < 2; h++) {
+        const uint32_t r = tiled ? dst + ((uint32_t)((m / 16) * (N / 16) + 2 * b + h) << 4) + (uint32_t)(m % 16)
+                                 : dst + 2 * blk + (uint32_t)h;
+        auto &row = gemmini_state.spad[r & 0x3FFF];
+        for (int c = 0; c < 16; c++) row[c] = (elem_t)mx::fp8_e4m3_to_code(v[16 * h + c] / scale);
+      }
+    }
+}
+
 void gemmini_t::mx_load_scales(reg_t rs1, reg_t rs2) {
   // rs1[39:0] addr, rs1[63:40] DRAM row pitch; rs2[31:0] bytes/row (1-D: total), [32] sel, [45:33] dest byte
   // offset, [53:46] rows (0 = 1). Rows land contiguously from dest, matching the RTL loader.
@@ -1311,6 +1399,10 @@ void gemmini_t::mx_loop_ws_spad(reg_t rs1, reg_t rs2) {
   }
   const int GROUP = 32;
   const size_t smem_base = (size_t)C_spad * DIM;
+  // RTL applies the store activation (config_st acc_act) on the acc READ path: ReLU affects what is
+  // stored, never the accumulator itself (K-tiles keep accumulating pre-ReLU partial sums).
+  const bool out_relu = gemmini_state.acc_act == gemmini_state_t::RELU;
+  auto relu_bf16 = [&](uint16_t v) -> uint16_t { return (out_relu && (v & 0x8000)) ? 0 : v; };
 
   // Stock loop_ws drops the accumulator's accumulate bit on the first k-tile when the caller asked
   // to overwrite (`if (!ex_accumulate && k == 0)`, :848), which is what lets a C region be reused.
@@ -1340,7 +1432,7 @@ void gemmini_t::mx_loop_ws_spad(reg_t rs1, reg_t rs2) {
       for (int m = 0; m < M_out; m++)
         for (int n = 0; n < N_out; n++)
           p->get_mmu()->store<uint16_t>(gemmini_state.mx_dram_C + ((reg_t)m * gemmini_state.mx_dram_C_stride + n) * 2,
-                                        gemmini_state.mx_smem[smem_base + (size_t)m * N_out + n]);
+                                        relu_bf16(gemmini_state.mx_smem[smem_base + (size_t)m * N_out + n]));
       return;
     }
     const size_t out_elems = (size_t)M_out * (size_t)N_out;
@@ -1365,7 +1457,8 @@ void gemmini_t::mx_loop_ws_spad(reg_t rs1, reg_t rs2) {
     const bool tiled = gemmini_state.mx_loop_reuse_tiled && (gemmini_state.mx_out_fmt != 3);
     const size_t tiles_N = (size_t)N_out / (size_t)DIM;
     for (size_t w = 0; w < W; w++) {
-      const uint16_t v = gemmini_state.mx_smem[smem_base + w];
+      const uint16_t v = gemmini_state.mx_out_fmt == 3 ? relu_bf16(gemmini_state.mx_smem[smem_base + w])
+                                                       : gemmini_state.mx_smem[smem_base + w];
       for (int half = 0; half < 2; half++) {
         const size_t k = 2 * w + (size_t)half;
         const elem_t byte = (elem_t)((half == 0) ? (v & 0xFF) : ((v >> 8) & 0xFF));
@@ -1484,7 +1577,7 @@ void gemmini_t::mx_loop_ws_spad(reg_t rs1, reg_t rs2) {
           bool has_nan = false, has_inf = false;
           for (int j = bi * GROUP_OUT; j < (bi + 1) * GROUP_OUT; j++) {
             const size_t idx = smem_base + (size_t)m * N_DIM + j;
-            float v = bf16_to_f32(gemmini_state.mx_smem[idx]);
+            float v = bf16_to_f32(relu_bf16(gemmini_state.mx_smem[idx]));
             if (std::isnan(v)) { has_nan = true; continue; }
             if (std::isinf(v)) { has_inf = true; continue; }
             float a = fabsf(v);
@@ -1534,7 +1627,7 @@ void gemmini_t::mx_loop_ws_spad(reg_t rs1, reg_t rs2) {
           float vals[32];
           for (int j = bi * GROUP_OUT; j < (bi + 1) * GROUP_OUT; j++) {
             const size_t idx = smem_base + (size_t)m * N_DIM + j;
-            vals[j - bi * GROUP_OUT] = bf16_to_f32(gemmini_state.mx_smem[idx]);
+            vals[j - bi * GROUP_OUT] = bf16_to_f32(relu_bf16(gemmini_state.mx_smem[idx]));
           }
           for (int jj = 0; jj < GROUP_OUT; jj++) {
             const int j = bi * GROUP_OUT + jj;
@@ -2432,6 +2525,10 @@ reg_t gemmini_t::CUSTOMFN(XCUSTOM_ACC)(rocc_insn_t insn, reg_t xs1, reg_t xs2) {
     loop_ws_config_scales(xs1, xs2);
   } else if (insn.funct == loop_ws_config_scale_strides_funct) {
     loop_ws_config_scale_strides(xs1, xs2);
+  } else if (insn.funct == vpu_exec_funct) {
+    vpu_exec(xs1, xs2);
+  } else if (insn.funct == spad_requant_funct) {
+    spad_requant(xs1, xs2);
   } else if (insn.funct == mx_lut_disable_funct) {
     gemmini_state.mx_lut_en = 0;   // G1: clear runtime LUT-usage flag
     gemmini_state.mx_lut_a_loaded = 0; gemmini_state.mx_lut_b_loaded = 0;

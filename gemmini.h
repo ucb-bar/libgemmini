@@ -188,6 +188,8 @@ public:
   void loop_ws_config_spad_C(reg_t rs1, reg_t rs2);
   void mxquant_config_mvout(reg_t rs1, reg_t rs2);
   void mx_load_scales(reg_t rs1, reg_t rs2);
+  void vpu_exec(reg_t rs1, reg_t rs2);
+  void spad_requant(reg_t rs1, reg_t rs2);
   void mx_read_smem(reg_t rs1, reg_t rs2);
   void mx_load_lut(reg_t rs1, reg_t rs2);
   void mx_loop_ws_spad(reg_t rs1, reg_t rs2);
@@ -246,6 +248,8 @@ private:
   const unsigned mx_lut_disable_funct          = 30;
   const unsigned loop_ws_config_scales_funct   = 31;
   const unsigned loop_ws_config_scale_strides_funct = 32;
+  const unsigned vpu_exec_funct                = 33;
+  const unsigned spad_requant_funct            = 34;
 
   const unsigned fence_funct = 127;
 
