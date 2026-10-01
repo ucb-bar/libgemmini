@@ -125,6 +125,7 @@ struct gemmini_state_t
   uint64_t mx_scale_dram;
   uint16_t mx_tiles_I, mx_tiles_J, mx_tiles_K;
   uint8_t mx_scale_act_sel, mx_scale_wgt_sel;
+  uint16_t mx_sc_ci, mx_sc_cj, mx_sc_ck;   // RTL ScaleFactorMem tile counters (free-running across loops)
   uint16_t mx_lut_update_granularity;
 
   uint32_t mx_loop_a_spad, mx_loop_b_spad;
@@ -133,6 +134,18 @@ struct gemmini_state_t
   bool     mx_loop_spad_marker;
   bool     mx_loop_reuse_tiled;   // LOOP_WS rs2 bit10: deposit requant output block-tiled (operand layout)
   bool     mx_loop_scale_resident; // LOOP_WS rs2 bit11: write requant output act-scales into mx_scale_a_mem (resident, transposed)
+
+  // Native MX DRAM loop (LOOP_WS with MX scales): loop-managed scales (LOOP_WS_CONFIG_SCALES/_STRIDES), the
+  // LoopMatmul slot that the next LOOP_WS takes (= its scale half), the per-slot A-scale reuse record, and
+  // the BF16 DRAM output target used by deposit_to_spad.
+  bool     mx_scales_used;   // an MX scale load happened -> DRAM LOOP_WS runs the MX model
+  uint64_t loop_ws_A_sc, loop_ws_B_sc, loop_ws_A_sc_stride, loop_ws_B_sc_stride;
+  uint8_t  mx_loop_slot;
+  bool     mx_asc_valid[2];
+  uint64_t mx_asc_addr[2], mx_asc_stride[2];
+  uint16_t mx_asc_I[2], mx_asc_K[2];
+  uint64_t mx_dram_C, mx_dram_C_stride;
+  bool     mx_dram_out;
 
   std::vector<uint8_t> mx_scale_a_mem;
   std::vector<uint8_t> mx_scale_b_mem;
@@ -178,6 +191,9 @@ public:
   void mx_read_smem(reg_t rs1, reg_t rs2);
   void mx_load_lut(reg_t rs1, reg_t rs2);
   void mx_loop_ws_spad(reg_t rs1, reg_t rs2);
+  void mx_loop_ws_dram(reg_t rs1, reg_t rs2);
+  void loop_ws_config_scales(reg_t rs1, reg_t rs2);
+  void loop_ws_config_scale_strides(reg_t rs1, reg_t rs2);
 
   void loop_conv_ws(reg_t rs1, reg_t rs2);
   void loop_conv_ws_config_1(reg_t rs1, reg_t rs2);
@@ -228,6 +244,8 @@ private:
   const unsigned mx_read_smem_funct            = 28;
   const unsigned mx_load_lut_funct             = 29;
   const unsigned mx_lut_disable_funct          = 30;
+  const unsigned loop_ws_config_scales_funct   = 31;
+  const unsigned loop_ws_config_scale_strides_funct = 32;
 
   const unsigned fence_funct = 127;
 
