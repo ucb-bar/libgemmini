@@ -1119,7 +1119,7 @@ void gemmini_t::vpu_exec(reg_t rs1, reg_t rs2) {
   int rlen = (int)((rs2 >> 5) & 0x3FF);
   const uint16_t imm = (uint16_t)((rs2 >> 16) & 0xFFFF);
   if (DIM != 2 * VPU_LANES) { fprintf(stderr, "VPU_EXEC: needs DIM=16 (8 BF16 per spad row)\n"); abort(); }
-  if (op > VPU_RAMAX) { fprintf(stderr, "VPU_EXEC: illegal op %d\n", op); abort(); }
+  if (op > VPU_EXPSUB) { fprintf(stderr, "VPU_EXEC: illegal op %d\n", op); abort(); }
   if (rows == 0) return;
   if (rlen == 0) rlen = 1024;   // RTL row-in-group counter is 10 bits
   if (gemmini_state.spad.size() < 0x4000) gemmini_state.spad.resize(0x4000, std::vector<elem_t>(DIM, 0));
@@ -1128,12 +1128,12 @@ void gemmini_t::vpu_exec(reg_t rs1, reg_t rs2) {
     for (int l = 0; l < VPU_LANES; l++) v[l] = (uint16_t)((uint8_t)r[2 * l] | ((uint8_t)r[2 * l + 1] << 8));
   };
   const int n2 = bcast ? (rows + rlen - 1) / rlen : rows;
-  std::vector<std::array<uint16_t, VPU_LANES>> a(rows), b(op <= VPU_MUL ? n2 : 0), o(rows);
+  std::vector<std::array<uint16_t, VPU_LANES>> a(rows), b(vpu_uses_src2(op) ? n2 : 0), o(rows);
   for (int i = 0; i < rows; i++) rd(src1 + i, a[i].data());
   for (int i = 0; i < (int)b.size(); i++) rd(src2 + i, b[i].data());
   vpu_ref_exec(op, (uint16_t (*)[VPU_LANES])o.data(), (const uint16_t (*)[VPU_LANES])a.data(),
                b.empty() ? nullptr : (const uint16_t (*)[VPU_LANES])b.data(), rows, rlen, bcast, imm);
-  const int nout = op >= VPU_RMAX ? rows / rlen : rows;
+  const int nout = vpu_is_reduction(op) ? rows / rlen : rows;
   for (int i = 0; i < nout; i++) {
     auto &r = gemmini_state.spad[(dst + i) & 0x3FFF];
     for (int l = 0; l < VPU_LANES; l++) { r[2 * l] = (elem_t)(o[i][l] & 0xFF); r[2 * l + 1] = (elem_t)(o[i][l] >> 8); }
