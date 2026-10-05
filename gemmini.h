@@ -6,6 +6,7 @@
 #include <random>
 #include <limits>
 #include "gemmini_params.h"
+#include "gemmini_perf.h"
 
 typedef acc_t output_t; // Systolic array output datatype (coming down from PEs, moving into accumulator)
 static const uint32_t sp_matrices = (BANK_NUM * BANK_ROWS) / DIM; // Size the scratchpad to fit sp_matrices matrices
@@ -210,6 +211,7 @@ public:
 
 private:
   gemmini_state_t gemmini_state;
+  gemmini_perf_t perf;   // timing model (gemmini_perf.h); mode from $GEMMINI_MODE
   reg_t cause;
   reg_t aux;
   processor_t* p;

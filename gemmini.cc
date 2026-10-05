@@ -96,6 +96,7 @@ void gemmini_state_t::reset()
 
 void gemmini_t::reset() {
   gemmini_state.reset();
+  perf.reset();
 }
 
 template <class T>
@@ -2457,6 +2458,7 @@ reg_t gemmini_t::CUSTOMFN(XCUSTOM_ACC)(rocc_insn_t insn, reg_t xs1, reg_t xs2) {
   if (!gemmini_state.resetted) {
     reset();
   }
+  if (perf.on_cmd(p, insn.funct, xs1, xs2)) return 0;   // perf mode: timed, data work skipped (gemmini_perf.cc)
   if (gemmini_state.op_in_progress)
     counter_increment_random();
 
@@ -2903,6 +2905,7 @@ std::vector<insn_desc_t> gemmini_t::get_instructions(const processor_t &p)
 {
   std::vector<insn_desc_t> insns;
   push_custom_insn(insns, ROCC_OPCODE3, ROCC_OPCODE_MASK, ILLEGAL_INSN_FUNC, gemmini_custom);
+  gemmini_perf_t::add_instructions(insns);   // perf / both: fence + rdcycle see modelled time
   return insns;
 }
 
