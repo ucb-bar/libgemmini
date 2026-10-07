@@ -1120,7 +1120,7 @@ void gemmini_t::vpu_exec(reg_t rs1, reg_t rs2) {
   int rlen = (int)((rs2 >> 5) & 0x3FF);
   const uint16_t imm = (uint16_t)((rs2 >> 16) & 0xFFFF);
   if (DIM != 2 * VPU_LANES) { fprintf(stderr, "VPU_EXEC: needs DIM=16 (8 BF16 per spad row)\n"); abort(); }
-  if (op > VPU_EXPSUB) { fprintf(stderr, "VPU_EXEC: illegal op %d\n", op); abort(); }
+  if (op > VPU_EXPSUM) { fprintf(stderr, "VPU_EXEC: illegal op %d\n", op); abort(); }
   if (rows == 0) return;
   if (rlen == 0) rlen = 1024;   // RTL row-in-group counter is 10 bits
   if (gemmini_state.spad.size() < 0x4000) gemmini_state.spad.resize(0x4000, std::vector<elem_t>(DIM, 0));
@@ -1138,6 +1138,15 @@ void gemmini_t::vpu_exec(reg_t rs1, reg_t rs2) {
   for (int i = 0; i < nout; i++) {
     auto &r = gemmini_state.spad[(dst + i) & 0x3FFF];
     for (int l = 0; l < VPU_LANES; l++) { r[2 * l] = (elem_t)(o[i][l] & 0xFF); r[2 * l + 1] = (elem_t)(o[i][l] >> 8); }
+  }
+  if (op == VPU_EXPSUM) {   // row sums of the written result (as RSUM over it), one row per logical row at imm[13:0]
+    std::vector<std::array<uint16_t, VPU_LANES>> s(rows / rlen);
+    vpu_ref_exec(VPU_RSUM, (uint16_t (*)[VPU_LANES])s.data(), (const uint16_t (*)[VPU_LANES])o.data(), nullptr,
+                 rows, rlen, 0, 0);
+    for (int g = 0; g < rows / rlen; g++) {
+      auto &r = gemmini_state.spad[((imm & 0x3FFF) + g) & 0x3FFF];
+      for (int l = 0; l < VPU_LANES; l++) { r[2 * l] = (elem_t)(s[g][l] & 0xFF); r[2 * l + 1] = (elem_t)(s[g][l] >> 8); }
+    }
   }
 }
 
@@ -1190,7 +1199,12 @@ void gemmini_t::spad_requant(reg_t rs1, reg_t rs2) {
         const uint32_t r = tiled ? dst + ((uint32_t)((m / 16) * (N / 16) + 2 * b + h) << 4) + (uint32_t)(m % 16)
                                  : dst + 2 * blk + (uint32_t)h;
         auto &row = gemmini_state.spad[r & 0x3FFF];
-        for (int c = 0; c < 16; c++) row[c] = (elem_t)mx::fp8_e4m3_to_code(v[16 * h + c] / scale);
+        // a -0.0 element keeps its sign (0x80), as the RTL requantizer does; fp8_e4m3_to_code canonicalizes it to +0
+        // for the Python matmul-requant golden
+        for (int c = 0; c < 16; c++) {
+          const float x = v[16 * h + c] / scale;
+          row[c] = (elem_t)(x == 0.0f && std::signbit(x) ? 0x80 : mx::fp8_e4m3_to_code(x));
+        }
       }
     }
 }
@@ -2905,7 +2919,7 @@ std::vector<insn_desc_t> gemmini_t::get_instructions(const processor_t &p)
 {
   std::vector<insn_desc_t> insns;
   push_custom_insn(insns, ROCC_OPCODE3, ROCC_OPCODE_MASK, ILLEGAL_INSN_FUNC, gemmini_custom);
-  gemmini_perf_t::add_instructions(insns);   // perf / both: fence + rdcycle see modelled time
+  perf.on_register(p, insns);   // perf / both: fence + rdcycle see modelled time; CPU-store tracing from here
   return insns;
 }
 

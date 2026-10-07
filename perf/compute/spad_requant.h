@@ -22,13 +22,18 @@ public:
       : eq_(eq), sp_(sp), rs_(rs), dim_((uint32_t)c.mesh_dim), per_block_((cycle_t)c.sreq_cycles_per_block),
         fixed_((cycle_t)c.sreq_fixed_cycles) {}
 
-  struct cmd_t { uint32_t src, dst, M, N; };
+  struct cmd_t { uint32_t src, dst, M, N; bool tiled, resident; };
   static cmd_t decode(uint64_t rs1, uint64_t rs2) {
     return {(uint32_t)(rs1 & 0x3FFF), (uint32_t)((rs1 >> 14) & 0x3FFF), (uint32_t)(rs2 & 0xFFFF),
-            (uint32_t)((rs2 >> 16) & 0xFFFF)};
+            (uint32_t)((rs2 >> 16) & 0xFFFF), (bool)((rs1 >> 28) & 1), (bool)((rs1 >> 29) & 1)};
   }
+  // exact footprints as the RS computes them (LoopMatmul.scala vec_bypass): BF16 source M*N/8 rows, E4M3
+  // destination M*N/16 rows (M padded to 16 when tiled)
   span_t read_span(const cmd_t &c) const { return make_span(local_addr_t{c.src}, (uint64_t)c.M * c.N * 2 / dim_, false); }
-  span_t write_span(const cmd_t &c) const { return make_span(local_addr_t{c.dst}, (uint64_t)c.M * c.N / dim_, true); }
+  span_t write_span(const cmd_t &c) const {
+    const uint64_t m = c.tiled ? ((c.M + 15) & ~15u) : c.M;
+    return make_span(local_addr_t{c.dst}, m * c.N / dim_, true);
+  }
 
   bool has_room() const { return !busy_; }
   void accept(uint64_t rs_id, cmd_t c) {

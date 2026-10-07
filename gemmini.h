@@ -167,6 +167,8 @@ public:
 
   reg_t CUSTOMFN(XCUSTOM_ACC)(rocc_insn_t insn, reg_t xs1, reg_t xs2);
   void reset();
+  // spike resets each extension with its processor before the program runs: the perf model hooks the CPU's stores
+  void reset(processor_t &proc) override { set_processor(&proc); reset(); perf.attach(&proc); }
   void set_processor(processor_t* p) { this->p = p; }
 
   void mvin(reg_t dram_addr, reg_t sp_addr, int state_id);

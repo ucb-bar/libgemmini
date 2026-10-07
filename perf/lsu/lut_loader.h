@@ -18,6 +18,7 @@ public:
       : eq_(eq), mem_(mem), fixed_((cycle_t)c.lut_fixed_cycles) {}
 
   bool busy() const { return busy_; }
+  cycle_t last_done() const { return last_done_; }
   // MX_LOAD_LUT rs1 = DRAM address, rs2 = num tables [31:0] | entry bits [39:34] (0 = 6).
   void load(uint64_t addr, uint32_t tables, uint32_t entry_bits, done_t done) {
     if (entry_bits == 0) entry_bits = 6;
@@ -30,18 +31,19 @@ private:
   void next(uint64_t addr, uint64_t words_left, done_t done) {
     if (words_left == 0) {
       const cycle_t t = eq_.now() + fixed_;
-      eq_.at(t, [this, done, t] { busy_ = false; done(t); });
+      eq_.at(t, [this, done, t] { busy_ = false; last_done_ = t; done(t); });
       return;
     }
     mem_.read(addr, [this, addr, words_left, done](cycle_t t) {
       eq_.at(t + 1, [this, addr, words_left, done] { next(addr + 8, words_left - 1, done); });
-    });
+    }, "lget", true);
   }
 
   event_queue_t &eq_;
   memory_system_t &mem_;
   cycle_t fixed_;
   bool busy_ = false;
+  cycle_t last_done_ = 0;
 };
 
 }  // namespace gperf

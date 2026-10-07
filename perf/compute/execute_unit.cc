@@ -9,7 +9,7 @@ execute_unit_t::execute_unit_t(const config_t &c, event_queue_t &eq, scratchpad_
     : eq_(eq), sp_(sp), acc_(acc), rs_(rs), queue_len_((size_t)c.ex_queue_length), dim_((uint32_t)c.mesh_dim),
       min_rows_((uint32_t)c.mesh_min_rows), issue_lat_((cycle_t)c.mesh_issue_latency),
       fill_lat_((cycle_t)c.mesh_fill_latency), commit_lat_((cycle_t)c.mesh_commit_latency),
-      drain_extra_((cycle_t)c.mesh_drain_extra) {}
+      drain_extra_((cycle_t)c.mesh_drain_extra), lone_preload_((cycle_t)c.mesh_lone_preload_cycles) {}
 
 void execute_unit_t::accept(uint64_t rs_id, ex_cmd_t c) {
   q_.push_back({rs_id, std::move(c)});
@@ -44,7 +44,8 @@ void execute_unit_t::process() {
       q_.pop_front();
       rs_.kick(Q_EX);
       busy_now_ = true;
-      auto finish = [this, id = head.id](cycle_t t) {
+      auto finish = [this, id = head.id, exec = head.c.on_execute](cycle_t t) {
+        if (exec) exec();
         eq_.at(t + drain_extra_, [this, id] {
           rs_.complete(id);
           busy_now_ = false;
@@ -64,8 +65,11 @@ void execute_unit_t::run_tile(const item_t *pre, const item_t &comp) {
   uint32_t rows = comp.c.rows ? comp.c.rows : dim_;
   if (rows < min_rows_) rows = min_rows_;
   // back to back with the previous compute: no bubble; from idle: the spad request -> a_buf latency
-  const cycle_t start = eq_.now() <= last_feed_end_ ? eq_.now() : eq_.now() + issue_lat_;
   const bool new_weights = pre && !pre->c.b.garbage() && !pre->c.b.is_acc();
+  // back to back with the previous compute: no bubble, the preload rides under it; from idle: the spad request ->
+  // a_buf latency, and new weights go in as their own short mesh request first
+  const bool idle = eq_.now() > last_feed_end_;
+  const cycle_t start = !idle ? eq_.now() : eq_.now() + issue_lat_ + (new_weights ? lone_preload_ : 0);
   if (pre) weights_ = pre->c.b;
   const uint64_t comp_id = comp.id, pre_id = pre ? pre->id : 0;
   const local_addr_t c = pre ? pre->c.c : local_addr_t{0xFFFFFFFFu};
@@ -73,6 +77,7 @@ void execute_unit_t::run_tile(const item_t *pre, const item_t &comp) {
   auto fed = [this, rows, start, comp_id, pre_id, c, left](cycle_t t) {
     if (--*left > 0) return;
     busy_ += (uint64_t)(t - start);
+    trace_ev("tile", t - rows);
     last_feed_end_ = t;
     tiles_++;
     rs_.complete(comp_id);

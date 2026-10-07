@@ -53,14 +53,16 @@ public:
   dma_writer_t(const config_t &c, event_queue_t &eq, memory_system_t &mem);
 
   // Rows whose data is ready from `earliest`, one row per `cycles_per_row` cycles. done(t): every Put acked.
+  // issued(t), if given: all but `slack` of the job's Puts have been accepted by the bus (the store controller is
+  // held until then: its write queues hold `slack` Puts).
   void submit(uint64_t addr, uint32_t rows, uint32_t row_bytes, uint64_t stride, cycle_t earliest,
-              double cycles_per_row, done_t done);
+              double cycles_per_row, done_t done, done_t issued = nullptr, uint32_t slack = 0);
 
   uint64_t puts() const { return puts_; }
 
 private:
-  struct put_t { uint64_t addr; uint32_t bytes; cycle_t ready; uint64_t job; };
-  struct job_t { uint64_t left; done_t done; cycle_t last_ack; };
+  struct put_t { uint64_t addr; uint32_t bytes; cycle_t ready; uint64_t job; bool fire; };   // fire: the job's issued()
+  struct job_t { uint64_t left; done_t done; cycle_t last_ack; done_t issued; };
   void try_issue();
 
   event_queue_t &eq_;

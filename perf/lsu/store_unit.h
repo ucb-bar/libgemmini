@@ -40,6 +40,7 @@ public:
   void accept(uint64_t rs_id, st_cmd_t c);
 
   uint64_t reads() const { return reads_; }
+  cycle_t last_write() const { return last_write_; }   // requant output written into the scratchpad
 
 private:
   struct item_t { uint64_t id; st_cmd_t c; uint64_t stride; };
@@ -52,12 +53,13 @@ private:
   reservation_station_t &rs_;
   size_t queue_len_;
   uint32_t dim_;
-  cycle_t lag_, rq_lat_;
+  cycle_t lag_, rq_lat_, pipe_lat_, slack_;
   double elems_per_read_;
   uint64_t stride_ = 0;
   std::deque<item_t> q_;
   bool reading_ = false;
   uint64_t reads_ = 0;
+  cycle_t last_write_ = 0;
 };
 
 }  // namespace gperf

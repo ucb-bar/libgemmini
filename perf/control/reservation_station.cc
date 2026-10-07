@@ -17,14 +17,17 @@ uint64_t reservation_station_t::alloc(rs_cmd_t c) {
   e.c = std::move(c);
   e.alloc_t = eq_.now();
   for (int q = 0; q < Q_COUNT; q++) {
-    if (q == e.c.q) continue;
+    if (q == e.c.q && q != Q_VEC) continue;   // ld / ex / st: ordered within their queue by the issue rules
     for (uint64_t oid : order_[q]) {
       ent_t &o = ents_[oid];
-      const span_t *mine[2] = {&e.c.a, &e.c.b}, *theirs[2] = {&o.c.a, &o.c.b};
+      const span_t *mine[4] = {&e.c.a, &e.c.b, &e.c.c, &e.c.d}, *theirs[4] = {&o.c.a, &o.c.b, &o.c.c, &o.c.d};
       bool dep = false;
       for (auto m : mine)
         for (auto t : theirs)
           if (overlaps(*m, *t) && (m->write || t->write)) dep = true;
+      if (e.c.q == Q_VEC && q == Q_VEC)   // across vector units: shared read banks, SPAD_REQUANT in order
+        dep = dep || (e.c.read_banks & o.c.read_banks) || (e.c.vec == 2 && o.c.vec == 2);
+      if (e.c.q == Q_VEC && e.c.vec == 2 && q == Q_ST && o.c.quantized_store) dep = true;
       if (dep) { e.deps++; o.dependents.push_back(id); }
     }
   }
@@ -45,21 +48,32 @@ void reservation_station_t::kick(queue_t q) {
 
 void reservation_station_t::try_issue(queue_t q) {
   if (last_issue_[q] >= eq_.now()) { kick(q); return; }
-  const bool serial = q == Q_ST || q == Q_VEC;
   uint64_t cand = 0;
-  for (uint64_t id : order_[q]) {
-    ent_t &e = ents_[id];
-    if (e.issued) {
-      if (serial) return;   // an older one has not completed
-      continue;
+  if (q == Q_VEC) {   // out of order: the oldest entry that is ready and whose unit is free
+    for (uint64_t id : order_[q]) {
+      ent_t &e = ents_[id];
+      if (e.issued || e.deps > 0 || (e.c.unit_has_room && !e.c.unit_has_room())) continue;
+      cand = id;
+      break;
     }
-    cand = id;
-    break;
+    if (!cand) return;
+  } else {
+    const bool serial = q == Q_ST;
+    for (uint64_t id : order_[q]) {
+      ent_t &e = ents_[id];
+      if (e.issued) {
+        if (serial) return;   // an older one has not completed
+        continue;
+      }
+      cand = id;
+      break;
+    }
+    if (!cand) return;
+    ent_t &e = ents_[cand];
+    if (e.deps > 0) return;   // re-kicked when a dependency clears
+    if (e.c.unit_has_room && !e.c.unit_has_room()) return;   // re-kicked by the unit
   }
-  if (!cand) return;
   ent_t &e = ents_[cand];
-  if (e.deps > 0) return;   // re-kicked when a dependency clears
-  if (e.c.unit_has_room && !e.c.unit_has_room()) return;   // re-kicked by the unit
   e.issued = true;
   e.issue_t = eq_.now();
   last_issue_[q] = eq_.now();
@@ -73,6 +87,7 @@ void reservation_station_t::complete(uint64_t id) {
   if (it == ents_.end()) return;
   ent_t e = std::move(it->second);
   ents_.erase(it);
+  last_complete_ = cmax(last_complete_, eq_.now());
   auto &ord = order_[e.c.q];
   ord.erase(std::find(ord.begin(), ord.end(), id));
   if (trace_cb_) trace_cb_(e.c, e.alloc_t, e.issue_t, eq_.now());
@@ -87,4 +102,20 @@ void reservation_station_t::complete(uint64_t id) {
   if (room_cb_) room_cb_();
 }
 
+}  // namespace gperf
+
+namespace gperf {
+std::string reservation_station_t::describe() const {
+  static const char *qn[Q_COUNT] = {"ld", "ex", "st", "vec"};
+  std::string out;
+  for (int q = 0; q < Q_COUNT; q++) {
+    out += std::string(qn[q]) + "=" + std::to_string(order_[q].size());
+    if (!order_[q].empty()) {
+      const auto &e = ents_.at(order_[q].front());
+      out += "(head " + std::string(e.c.what) + (e.issued ? " issued" : "") + " deps " + std::to_string(e.deps) + ")";
+    }
+    out += " ";
+  }
+  return out;
+}
 }  // namespace gperf

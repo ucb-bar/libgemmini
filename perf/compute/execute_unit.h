@@ -9,6 +9,7 @@
 #include "../memory/accumulator.h"
 #include "../params/config.h"
 #include "../sim/event_queue.h"
+#include "../sim/trace.h"
 #include "../control/reservation_station.h"
 #include "../memory/scratchpad.h"
 #include "../sim/types.h"
@@ -33,6 +34,7 @@ public:
     local_addr_t a{0xFFFFFFFFu}, b{0xFFFFFFFFu}, c{0xFFFFFFFFu};   // compute: a; preload: b (weights), c (acc)
     uint32_t rows = 0;
     std::function<void(done_t)> wait_for;   // CONFIG: an extra condition (e.g. scale loads landed)
+    std::function<void()> on_execute;       // CONFIG: what it does when it executes (e.g. claim a scale half)
   };
   bool has_room() const { return q_.size() < queue_len_; }
   void accept(uint64_t rs_id, ex_cmd_t c);
@@ -51,7 +53,7 @@ private:
   reservation_station_t &rs_;
   size_t queue_len_;
   uint32_t dim_, min_rows_;
-  cycle_t issue_lat_, fill_lat_, commit_lat_, drain_extra_;
+  cycle_t issue_lat_, fill_lat_, commit_lat_, drain_extra_, lone_preload_;
   std::deque<item_t> q_;
   bool busy_now_ = false;          // a tile is feeding or a config is draining
   int tiles_in_flight_ = 0;        // fed, not yet committed

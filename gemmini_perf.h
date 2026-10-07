@@ -33,8 +33,14 @@ public:
   // functional work must be skipped (perf mode, a command that moves or computes data).
   bool on_cmd(processor_t *p, unsigned funct, uint64_t rs1, uint64_t rs2);
 
+  // Start observing the CPU's stores (perf / both, unless mem.host_tracking = 0).
+  void attach(processor_t *p);
+
   // In perf / both: the fence and rdcycle overrides, appended to the extension's instructions.
   static void add_instructions(std::vector<insn_desc_t> &insns);
+  // The extension is being registered with processor p (gemmini_t::get_instructions): add_instructions, and in
+  // perf / both create the model and start tracing the CPU's stores.
+  void on_register(const processor_t &p, std::vector<insn_desc_t> &insns);
 
 private:
   gemmini_mode_t mode_ = gemmini_mode_t::FUNC;
