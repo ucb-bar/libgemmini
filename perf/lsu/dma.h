@@ -27,9 +27,10 @@ public:
 
   uint64_t gets() const { return gets_; }
   uint64_t bytes() const { return bytes_; }
+  double mean_latency() const { return gets_ ? (double)lat_sum_ / (double)gets_ : 0; }   // Get accepted -> data
 
 private:
-  struct get_t { uint64_t addr; uint32_t useful, spad_row; uint64_t job; bool last; cycle_t back = NEVER; };
+  struct get_t { uint64_t addr; uint32_t useful, spad_row; uint64_t job; bool last; cycle_t back = NEVER; cycle_t sent = 0; };
   void try_issue();
   void try_merge();
 
@@ -37,6 +38,7 @@ private:
   memory_system_t &mem_;
   scratchpad_t &sp_;
   uint32_t get_bytes_, max_in_flight_, row_bytes_per_cycle_;
+  uint64_t lat_sum_ = 0;
   cycle_t interval_;
   std::deque<get_t> to_issue_, issued_;   // issued_: in request order, merged from the front
   uint64_t base_seq_ = 0, next_job_ = 0;

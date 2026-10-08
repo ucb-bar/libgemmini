@@ -1150,7 +1150,9 @@ void gemmini_t::vpu_exec(reg_t rs1, reg_t rs2) {
   }
 }
 
-// SPAD_REQUANT: rs1 = src[13:0] | dst[27:14] | tiled[28] | resident[29] | scale DRAM[62:30], rs2 = M[15:0] | N[31:16].
+// SPAD_REQUANT: rs1 = src[13:0] | dst[27:14] | tiled[28] | resident[29] | scale DRAM[62:30], rs2 = M[15:0] | N[31:16] |
+// fp4[32]. FP4: codes = the matmul FP4 requant element (bf16(v / scale) -> E2M1), byte (m/2, n) = row m even low nibble,
+// flat dst + (m/2)*N/16 + n/16 or tiled as the FP4 operand A (dst + ((m/32)*N/16 + n/16)*16 + (m/2)%16).
 // Row-major BF16 tile in the spad -> E4M3 codes (flat or operand-A tiled) + one E8M0 per 32 values along a row, filed
 // row-major to the command's scale DRAM address and, when resident, transposed [GN][M] into the act-scale window.
 // Same block scale / element encoding as the matmul requant golden.
@@ -1160,6 +1162,7 @@ void gemmini_t::spad_requant(reg_t rs1, reg_t rs2) {
   const bool resident = (rs1 >> 29) & 1;
   const reg_t scale_dram = (rs1 >> 30) & 0x1FFFFFFFFULL;
   const int M = (int)(rs2 & 0xFFFF), N = (int)((rs2 >> 16) & 0xFFFF);
+  const bool fp4 = (rs2 >> 32) & 1;
   if (DIM != 16 || N % 32 != 0 || M % 8 != 0 || ((M * (N / 32)) % 32) != 0 || M * (N / 32) > 2048) {
     fprintf(stderr, "SPAD_REQUANT: needs DIM=16, N%%32==0, M%%8==0, M*N/32 a multiple of 32 and <= 2048\n");
     abort();
@@ -1194,6 +1197,19 @@ void gemmini_t::spad_requant(reg_t rs1, reg_t rs2) {
         const size_t a_off = (size_t)b * (size_t)M + (size_t)m;
         if (a_off >= gemmini_state.mx_scale_a_mem.size()) gemmini_state.mx_scale_a_mem.resize(a_off + 1, 0x7f);
         gemmini_state.mx_scale_a_mem[a_off] = scale_code;
+      }
+      if (fp4) {
+        for (int k = 0; k < 32; k++) {
+          const int p = m / 2, n = 32 * b + k;
+          const uint32_t r = tiled ? dst + ((uint32_t)((p / 16) * (N / 16) + n / 16) << 4) + (uint32_t)(p % 16)
+                                   : dst + (uint32_t)(p * (N / 16) + n / 16);
+          auto &row = gemmini_state.spad[r & 0x3FFF];
+          const uint8_t code = mx::bf16_bits_to_fp4_e2m1_code(mx::f32_to_bf16_rne(v[k] / scale));
+          uint8_t byte = (uint8_t)row[n % 16];
+          byte = (m & 1) ? (uint8_t)((byte & 0x0F) | (code << 4)) : (uint8_t)((byte & 0xF0) | code);
+          row[n % 16] = (elem_t)byte;
+        }
+        continue;
       }
       for (int h = 0; h < 2; h++) {
         const uint32_t r = tiled ? dst + ((uint32_t)((m / 16) * (N / 16) + 2 * b + h) << 4) + (uint32_t)(m % 16)
@@ -1290,7 +1306,8 @@ void gemmini_t::loop_ws_config_scale_strides(reg_t rs1, reg_t rs2) {
   gemmini_state.loop_ws_B_sc_stride = rs2;
 }
 
-// Native MX DRAM loop (RTL LoopMatmul with A/B/C in DRAM), E4M3-single x E4M3-single, BF16 out, no padding.
+// Native MX DRAM loop (RTL LoopMatmul with A/B/C in DRAM), E4M3-single x E4M3-single or FP4 x FP4 (quad: 2*DIM-row A
+// tiles [M/2][K] row-pair packed, 2*DIM-col B tiles [K][N/2]), BF16 out, no padding.
 // K-tiling: consecutive loops with ex_accumulate (C = NULL except on the last K-tile) add into the same
 // shadow-acc region, as the RTL keeps one acc half while C is NULL.
 // Loop-managed scales (A_sc != 0) mirror the loop unit: 2-D scale loads into half = slot (A skipped when A is
@@ -1304,10 +1321,13 @@ void gemmini_t::mx_loop_ws_dram(reg_t rs1, reg_t rs2) {
   const uint8_t slot = gemmini_state.mx_loop_slot;
   const bool single = gemmini_state.mx_act_fmt == 0 && !gemmini_state.mx_fp8_altfmt && !gemmini_state.mx_lut_a_loaded &&
                       gemmini_state.mx_wgt_fmt == 0 && !gemmini_state.mx_wgt_altfmt && !gemmini_state.mx_lut_b_loaded;
-  if (!single || gemmini_state.mx_out_fmt != 3 || (rs2 & 0x7) ||
+  const bool fp4 = gemmini_state.mx_act_fmt == 2 && gemmini_state.mx_wgt_fmt == 2 && !gemmini_state.mx_fp8_altfmt &&
+                   !gemmini_state.mx_wgt_altfmt && !gemmini_state.mx_lut_a_loaded && !gemmini_state.mx_lut_b_loaded;
+  const reg_t TW = fp4 ? 2 * DIM : DIM;   // scale bytes per tile row / col
+  if (!(single || fp4) || gemmini_state.mx_out_fmt != 3 || (rs2 & 0x7) ||
       gemmini_state.loop_ws_pad_I || gemmini_state.loop_ws_pad_J || gemmini_state.loop_ws_pad_K ||
       gemmini_state.loop_ws_D != 0) {
-    printf("MX DRAM LOOP_WS: only E4M3-single x single, BF16 out, no pad/D/transpose/resadd\n");
+    printf("MX DRAM LOOP_WS: only E4M3-single x single or FP4 x FP4, BF16 out, no pad/D/transpose/resadd\n");
     exit(1);
   }
   const uint32_t half = (BANK_NUM * BANK_ROWS) / 2;
@@ -1324,7 +1344,7 @@ void gemmini_t::mx_loop_ws_dram(reg_t rs1, reg_t rs2) {
                      gemmini_state.mx_asc_I[slot] == I && gemmini_state.mx_asc_K[slot] == K;
     if (!hit) {
       mx_load_scales((gemmini_state.loop_ws_A_sc & 0xFFFFFFFFFFULL) | (gemmini_state.loop_ws_A_sc_stride << 40),
-                     (rows << 46) | (dest << 33) | ((reg_t)I * DIM));
+                     (rows << 46) | (dest << 33) | ((reg_t)I * TW));
       gemmini_state.mx_asc_valid[slot] = true;
       gemmini_state.mx_asc_addr[slot] = gemmini_state.loop_ws_A_sc;
       gemmini_state.mx_asc_stride[slot] = gemmini_state.loop_ws_A_sc_stride;
@@ -1332,7 +1352,7 @@ void gemmini_t::mx_loop_ws_dram(reg_t rs1, reg_t rs2) {
       gemmini_state.mx_asc_K[slot] = K;
     }
     mx_load_scales((gemmini_state.loop_ws_B_sc & 0xFFFFFFFFFFULL) | (gemmini_state.loop_ws_B_sc_stride << 40),
-                   (rows << 46) | (dest << 33) | (1ULL << 32) | ((reg_t)J * DIM));
+                   (rows << 46) | (dest << 33) | (1ULL << 32) | ((reg_t)J * TW));
     // the loop's own CONFIG_SCALE_MEM: rs1 = {0,0, slot, slot, K, J, I, 0}, rs2 = managed | granularity 1
     gemmini_state.mx_scale_dram = 0;
     gemmini_state.mx_tiles_I = I & 0x1FF;
@@ -1862,8 +1882,8 @@ void gemmini_t::mx_loop_ws_spad(reg_t rs1, reg_t rs2) {
           }
           for (int r = 0; r < TM; r++)
             for (int c = 0; c < TN; c++) {
-              const size_t a_off = group * (size_t)M_DIM + (size_t)(i*TM + r);
-              const size_t b_off = group * (size_t)N_DIM + (size_t)(j*TN + c);
+              const size_t a_off = gemmini_state.mx_scale_act_sel * 4096 + group * (size_t)M_DIM + (size_t)(i*TM + r);
+              const size_t b_off = gemmini_state.mx_scale_wgt_sel * 4096 + group * (size_t)N_DIM + (size_t)(j*TN + c);
               const uint8_t sa = (a_off < gemmini_state.mx_scale_a_mem.size()) ? gemmini_state.mx_scale_a_mem[a_off] : 0x7f;
               const uint8_t sb = (b_off < gemmini_state.mx_scale_b_mem.size()) ? gemmini_state.mx_scale_b_mem[b_off] : 0x7f;
               int e = (int)sa + (int)sb - 127;

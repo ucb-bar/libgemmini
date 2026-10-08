@@ -20,6 +20,7 @@ model_t::model_t(const config_t &c)
   rs_.on_room([this] { kick_at(eq_.now()); });
   rs_.on_done([this](int tag) { loops_.completed(tag); kick_at(eq_.now()); });
   scales_.on_room([this] { kick_at(eq_.now()); });
+  if (c.rs_vec_pending_gate) rs_.on_vec_pending([this] { return store_.pending_banks(); });
   if (c.mem_host_tracking >= 2 && c.host_icache && c.host_core_model) core_.reset(new host_core_t(c));
   if (const char *p = getenv("GEMMINI_PERF_REPLAY")) {
     if (!host_.load_replay(p)) { fprintf(stderr, "gemmini perf: cannot read GEMMINI_PERF_REPLAY=%s\n", p); abort(); }
@@ -29,9 +30,14 @@ model_t::model_t(const config_t &c)
     trace_ = fopen(p, "w");
     trace_file() = trace_;
     if (trace_) {
-      fprintf(trace_, "what,queue,alloc,issue,done\n");
+      // the row ranges (a..d: lo-hi, w = written; acc rows have bit 40 set) let commands be matched to the RTL's by address
+      fprintf(trace_, "what,queue,alloc,issue,done,spans\n");
       rs_.on_trace([this](const rs_cmd_t &c, cycle_t a, cycle_t i, cycle_t d) {
-        fprintf(trace_, "%s,%s,%lld,%lld,%lld\n", c.what, kQueueName[c.q], (long long)a, (long long)i, (long long)d);
+        char sp[160] = "", *o = sp;
+        for (const span_t *s : {&c.a, &c.b, &c.c, &c.d})
+          if (s->valid) o += snprintf(o, sizeof(sp) - (o - sp), "%llx-%llx%s ", (unsigned long long)s->lo,
+                                      (unsigned long long)s->hi, s->write ? "w" : "");
+        fprintf(trace_, "%s,%s,%lld,%lld,%lld,%s\n", c.what, kQueueName[c.q], (long long)a, (long long)i, (long long)d, sp);
       });
     }
   }
@@ -59,6 +65,14 @@ void model_t::kick_at(cycle_t t) {
 uint64_t model_t::rs_alloc(rs_cmd_t c) { return rs_.alloc(std::move(c)); }
 
 // The scratchpad banks a range touches (accumulator ranges: none).
+// A preload's C range in the RS: DIM rows from its address, or -- packed MX acc on RTL with the fix -- from the start of
+// its DIM-row group (ReservationStation.scala:302-307).
+span_t model_t::preload_c_span(local_addr_t c) const {
+  if (cfg_.rs_packed_preload_align && !c.garbage() && c.is_acc())
+    c = local_addr_t{c.raw & ~(uint32_t)(dim_ - 1)};
+  return make_span(c, dim_, true);
+}
+
 uint32_t model_t::bank_mask(const span_t &s) const {
   if (!s.valid || (s.lo >> 40)) return 0;
   uint32_t m = 0;
@@ -162,7 +176,7 @@ bool model_t::issue_loop(const loop_cmd_t &c) {
       pre.a = make_span(c.b, dim_, false);
       // the RS's view of the C rows: c_rows (DIM) from the tile's address, although a single-throughput tile
       // occupies DIM/4 accumulator rows -- so it overlaps the next tiles too (ReservationStation.scala:250-299)
-      pre.b = make_span(c.c, cfg_.rs_packed_exact ? dim_ / 4 : dim_, true);
+      pre.b = preload_c_span(c.c);
       pre.tag = LC_EX;
       pre.what = "loop_preload";
       pre.unit_has_room = [this] { return exec_.has_room(); };
@@ -251,7 +265,7 @@ bool model_t::issue_loop(const loop_cmd_t &c) {
       s.out_bytes = c.out_bytes;
       rs_cmd_t r;
       r.q = Q_ST;
-      r.a = c.kind == L_STC ? c.rs_span : cfg_.rs_packed_exact ? make_span(c.local, dim_ / 4, false) : store_.src_span(s);
+      r.a = c.rs_span;   // L_STC and L_STSPAD both carry the RTL's range
       r.b = c.out_span;
       r.quantized_store = c.out_bytes < 2.0;
       r.tag = LC_ST;
@@ -328,7 +342,7 @@ bool model_t::issue_raw(const rocc_cmd_t &cmd) {
       e.kind = execute_unit_t::ex_cmd_t::PRELOAD;
       e.b = local_addr_t{(uint32_t)rs1};
       e.c = local_addr_t{(uint32_t)rs2};
-      return rs_cmd(Q_EX, make_span(e.b, dim_, false), make_span(e.c, dim_, true), false, "preload",
+      return rs_cmd(Q_EX, make_span(e.b, dim_, false), preload_c_span(e.c), false, "preload",
                     [this] { return exec_.has_room(); }, [this, e](uint64_t id) { exec_.accept(id, e); });
     }
     case 4: case 5: {   // COMPUTE
@@ -387,6 +401,7 @@ bool model_t::issue_raw(const rocc_cmd_t &cmd) {
       if (vpu_t::uses_src2(v.op)) r.c = make_span(local_addr_t{v.src2}, vpu_t::src2_rows(v), false);
       if (v.op == 13) r.d = make_span(local_addr_t{v.dst2}, vpu_t::groups(v), true);
       r.read_banks = bank_mask(r.a) | bank_mask(r.c);
+      r.sp_banks = bank_mask(r.a) | bank_mask(r.b) | bank_mask(r.c) | bank_mask(r.d);
       r.unit_has_room = [this] { return vpu_.has_room(); };
       r.start = [this, v](uint64_t id) { vpu_.accept(id, v); };
       rs_alloc(std::move(r));
@@ -402,6 +417,7 @@ bool model_t::issue_raw(const rocc_cmd_t &cmd) {
       r.a = sreq_.read_span(s);
       r.b = sreq_.write_span(s);
       r.read_banks = bank_mask(r.a);
+      r.sp_banks = bank_mask(r.a) | bank_mask(r.b);
       r.unit_has_room = [this] { return sreq_.has_room(); };
       r.start = [this, s](uint64_t id) { sreq_.accept(id, s); };
       rs_alloc(std::move(r));
@@ -503,13 +519,13 @@ void model_t::report(FILE *f) const {
           (unsigned long long)eq_.events());
   fprintf(f, "  mesh: %llu tiles, %llu busy cycles; VPU: %llu commands\n", (unsigned long long)exec_.tiles(),
           (unsigned long long)exec_.busy_cycles(), (unsigned long long)vpu_.commands());
-  fprintf(f, "  load: %llu bytes in %llu Gets; store: %llu reads, %llu Puts; scales: %llu bytes\n",
+  fprintf(f, "  load: %llu bytes in %llu Gets (mean latency %.1f); store: %llu reads, %llu Puts; scales: %llu bytes\n",
           (unsigned long long)reader_.gets() ? (unsigned long long)reader_.bytes() : 0ULL,
-          (unsigned long long)reader_.gets(), (unsigned long long)store_.reads(), (unsigned long long)writer_.puts(),
+          (unsigned long long)reader_.gets(), reader_.mean_latency(), (unsigned long long)store_.reads(), (unsigned long long)writer_.puts(),
           (unsigned long long)scales_.bytes());
-  fprintf(f, "  memory: L2 %llu hits, %llu misses; bus busy %llu, DRAM busy %llu cycles; CPU stores %llu lines, "
+  fprintf(f, "  memory: L2 %llu hits (%llu on a pending fill), %llu misses; bus busy %llu, DRAM busy %llu cycles; CPU stores %llu lines, "
              "L1 probes %llu, partial-write fills %llu, dirty write-backs %llu%s\n",
-          (unsigned long long)mem_.hits(), (unsigned long long)mem_.misses(), (unsigned long long)mem_.bus_busy(),
+          (unsigned long long)mem_.hits(), (unsigned long long)mem_.pending_hits(), (unsigned long long)mem_.misses(), (unsigned long long)mem_.bus_busy(),
           (unsigned long long)mem_.dram_busy(), (unsigned long long)mem_.host_stores(),
           (unsigned long long)mem_.probes(), (unsigned long long)mem_.write_fills(),
           (unsigned long long)mem_.writebacks(), cfg_.mem_host_tracking ? "" : " (host tracking off)");

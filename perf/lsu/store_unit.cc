@@ -10,6 +10,7 @@ store_unit_t::store_unit_t(const config_t &c, event_queue_t &eq, scratchpad_t &s
     : eq_(eq), sp_(sp), acc_(acc), dma_(dma), rs_(rs), queue_len_((size_t)c.st_queue_length),
       dim_((uint32_t)c.mesh_dim), lag_((cycle_t)c.st_completion_lag), rq_lat_((cycle_t)c.st_requant_latency),
       pipe_lat_((cycle_t)c.st_pipe_latency), slack_((cycle_t)c.st_write_slack),
+      spad_rd_interval_((cycle_t)c.st_spad_read_interval),
       elems_per_read_(c.st_elems_per_acc_read) {}
 
 void store_unit_t::config(uint64_t rs1, uint64_t rs2) {
@@ -23,6 +24,12 @@ span_t store_unit_t::src_span(const st_cmd_t &c) const {
   // Loop-issued C stores carry their own range (loop_cmd_t::rs_span). The RS's store/mesh stalls come from the
   // preloads' DIM-row C range spilling over the packed DIM/4-row tiles (13.5).
   return make_span(c.src, (uint64_t)(blocks - 1) * dim_ + c.rows, false);
+}
+
+uint32_t store_unit_t::pending_banks() const {
+  uint32_t m = 0;
+  for (uint32_t b = 0; b < 32; b++) if (pend_[b]) m |= 1u << b;
+  return m;
 }
 
 void store_unit_t::accept(uint64_t rs_id, st_cmd_t c) {
@@ -72,13 +79,27 @@ void store_unit_t::process() {
     eq_.at(done + lag_, [this, id] { rs_.complete(id); });
     eq_.at(done, [this] { reading_ = false; process(); });
   };
-  rd->request(prio, now + 1, (cycle_t)reads, part);
+  if (!to_dram && c.src.is_acc() && spad_rd_interval_ > 1) {
+    // acc -> scratchpad: each read waits for the previous result's scratchpad write (one read per interval)
+    const cycle_t paced = now + 1 + (cycle_t)std::ceil(reads) * spad_rd_interval_;
+    rd->request(prio, now + 1, (cycle_t)reads, [part, paced](cycle_t t) { part(cmax(t, paced)); });
+    data_from = cmax(data_from, paced + pipe_lat_ + rq_lat_ -
+                                (cycle_t)std::ceil((double)c.rows * c.cols * c.out_bytes / dim_));
+  } else {
+    rd->request(prio, now + 1, (cycle_t)reads, part);
+  }
   if (to_dram) {
     dma_.submit(c.dram, c.rows, (uint32_t)std::ceil(row_bytes), it.stride, data_from, reads / c.rows, [](cycle_t) {},
                 [part](cycle_t t) { part(t); }, (uint32_t)slack_);
   } else {
     const cycle_t beats = (cycle_t)std::ceil((double)c.rows * c.cols * c.out_bytes / dim_);
-    sp_.write_port(c.dst.row()).request(SP_REQUANT, data_from, beats, [this](cycle_t t) { last_write_ = cmax(last_write_, t); });
+    const uint32_t b0 = sp_.bank_of(c.dst.row()), b1 = sp_.bank_of(c.dst.row() + (uint32_t)(beats ? beats - 1 : 0));
+    for (uint32_t b = b0; b <= b1 && b < 32; b++) pend_[b]++;
+    sp_.write_port(c.dst.row()).request(SP_REQUANT, data_from, beats, [this, b0, b1](cycle_t t) {
+      last_write_ = cmax(last_write_, t);
+      for (uint32_t b = b0; b <= b1 && b < 32; b++) pend_[b]--;
+      rs_.kick(Q_VEC);   // a vector entry may have been waiting on these banks
+    });
   }
 }
 

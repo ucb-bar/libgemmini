@@ -49,10 +49,13 @@ void reservation_station_t::kick(queue_t q) {
 void reservation_station_t::try_issue(queue_t q) {
   if (last_issue_[q] >= eq_.now()) { kick(q); return; }
   uint64_t cand = 0;
-  if (q == Q_VEC) {   // out of order: the oldest entry that is ready and whose unit is free
+  if (q == Q_VEC) {   // out of order: the oldest entry that is ready, whose unit is free and whose banks have no
+                      // store rows pending (unit_ok, ReservationStation.scala:574-578)
+    const uint32_t pending = vec_pending_ ? vec_pending_() : 0;
     for (uint64_t id : order_[q]) {
       ent_t &e = ents_[id];
       if (e.issued || e.deps > 0 || (e.c.unit_has_room && !e.c.unit_has_room())) continue;
+      if (e.c.sp_banks & pending) continue;   // re-kicked when the store unit's pending set shrinks
       cand = id;
       break;
     }

@@ -49,9 +49,12 @@ void dma_reader_t::try_issue() {
   gets_++;
   bytes_ += g.useful;
   mem_.read(g.addr, [this, seq](cycle_t t) {
-    issued_[(size_t)(seq - base_seq_)].back = t;
+    get_t &e = issued_[(size_t)(seq - base_seq_)];
+    e.back = t;
+    lat_sum_ += (uint64_t)(t - e.sent);
     try_merge();
-  }, "get", false, [this](cycle_t gr) {
+  }, "get", false, [this, seq](cycle_t gr) {
+    issued_[(size_t)(seq - base_seq_)].sent = gr;
     next_issue_ = gr + interval_ - 1;   // gr = the end of the accepted cycle
     try_issue();
   });

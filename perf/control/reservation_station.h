@@ -31,6 +31,7 @@ struct rs_cmd_t {
   int tag = -1;                              // >= 0: issued by LoopMatmul (for its throttles)
   int vec = 0;                               // vector queue: 1 = VPU_EXEC, 2 = SPAD_REQUANT
   uint32_t read_banks = 0;                   // vector entries: scratchpad banks it reads (one VPU read port each)
+  uint32_t sp_banks = 0;                     // vector entries: every scratchpad bank of a, b, c, d (entry_sp_banks)
   bool quantized_store = false;              // a store through the requantizer to a non-BF16 format
   const char *what = "";
 };
@@ -45,6 +46,9 @@ public:
   void kick(queue_t q);         // something changed (a unit took a command, a dependency cleared)
 
   void on_room(std::function<void()> cb) { room_cb_ = std::move(cb); }
+  // Banks with scratchpad-bound store rows still in flight (Scratchpad io.vpu_pending_banks): a vector entry touching
+  // one may not issue (ReservationStation.scala:574-578). Re-kick Q_VEC when the set shrinks.
+  void on_vec_pending(std::function<uint32_t()> cb) { vec_pending_ = std::move(cb); }
   void on_done(std::function<void(int tag)> cb) { done_cb_ = std::move(cb); }
   void on_trace(std::function<void(const rs_cmd_t &, cycle_t alloc, cycle_t issue, cycle_t done)> cb) {
     trace_cb_ = std::move(cb);
@@ -74,6 +78,7 @@ private:
   uint64_t next_id_ = 1, allocs_ = 0;
   cycle_t last_complete_ = 0;
   std::function<void()> room_cb_;
+  std::function<uint32_t()> vec_pending_;
   std::function<void(int)> done_cb_;
   std::function<void(const rs_cmd_t &, cycle_t, cycle_t, cycle_t)> trace_cb_;
 };

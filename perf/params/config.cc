@@ -18,6 +18,7 @@ config_t preset_e4m3_vpu() {
   c.rs_ld_entries = 32;   // ConfigsFP.scala:523
   c.vpu_units = 2;        // :520-522
   c.frontend_depth = 8;   // no LoopConv stage (Controller.scala:1115-1124)
+  c.rs_packed_preload_align = 1;   // VPU-config RTL is after b0dd6cb
   return c;
 }
 

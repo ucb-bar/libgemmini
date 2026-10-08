@@ -83,7 +83,7 @@ private:
     uint64_t A = 0, B = 0, C = 0, D = 0, A_stride = 0, B_stride = 0, C_stride = 0;
     uint64_t A_sc = 0, B_sc = 0, A_sc_stride = 0, B_sc_stride = 0;
     uint32_t a_sp = 0, b_end = 0, c_spad = 0, acc_base = 0, slot = 0;
-    bool spad_only = false, a_reuse = false, inc_acc = false, reads_act0 = true;
+    bool spad_only = false, a_reuse = false, inc_acc = false, reads_act0 = true, tiled = false;
     double out_bytes = 2.0;
     cycle_t start = 0;
     uint64_t serial = 0;          // which LOOP_WS this is (0, 1, ...)
@@ -102,6 +102,15 @@ private:
   // StC chunking (LoopMatmul.scala:573-577, 714-720): one chunk = one acc chunk = mbl/2 j tiles (32 BF16 columns,
   // whole 64 B lines); a j group of gb tiles stores gb * numChunks / 4 chunks (at least 1), so a 2-tile group is ONE
   // chunk, not two halves.
+  // LoopMatmulStCSpad (single throughput, LoopMatmul.scala:821-980): one store per 2-tile chunk of a 4-tile j group
+  // (chunks_this_j = tiles / 2), groups outer, i inner; every chunk's acc range is its group's DIM rows
+  static uint32_t sts_group_tiles(uint32_t J, uint32_t g) { return (g + 1) * 4 > J && J % 4 ? J % 4 : 4; }
+  static uint32_t sts_chunks(uint32_t J, uint32_t g) { return std::max(1u, sts_group_tiles(J, g) / 2); }
+  static uint32_t sts_per_i(uint32_t J) {
+    uint32_t n = 0;
+    for (uint32_t g = 0; g < (J + 3) / 4; g++) n += sts_chunks(J, g);
+    return n;
+  }
   uint32_t stc_tiles() const { return std::max(1u, mbl_ / 2); }
   uint32_t stc_chunks(uint32_t gb) const { return std::max(1u, gb / stc_tiles()); }
   uint32_t stc_per_i(uint32_t J) const {

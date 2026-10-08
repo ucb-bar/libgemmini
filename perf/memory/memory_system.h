@@ -50,6 +50,7 @@ public:
   cycle_t last_ack() const { return last_ack_; }   // Gemmini-visible: the latest Put ack (fills / write-backs are not)
   uint64_t write_fills() const { return write_fills_; }
   uint64_t misses() const { return misses_; }
+  uint64_t pending_hits() const { return pending_hits_; }   // Gets that found their line's fill outstanding
   uint64_t bus_busy() const { return bus_.busy_cycles(); }
   uint64_t dram_busy() const { return dram_.busy_cycles(); }
 
@@ -79,12 +80,13 @@ private:
   port_t bus_, client_bus_, dram_, l1_probe_;
   uint32_t line_bytes_;
   size_t capacity_lines_;
+  cycle_t miss_detect_ = 0, fill_to_data_ = 0;
   cycle_t hit_lat_, client_hit_lat_, dram_lat_, ack_lat_, full_ack_lat_, put_beats_, dram_cycles_per_line_,
-      put_serial_, fill_secondary_;
+      put_serial_, fill_secondary_first_, fill_secondary_next_;
   std::list<uint64_t> lru_;   // front = most recent
   std::unordered_map<uint64_t, line_t> lines_;
   cycle_t last_ack_ = 0;
-  uint64_t hits_ = 0, misses_ = 0, probes_ = 0, host_stores_ = 0, writebacks_ = 0, write_fills_ = 0;
+  uint64_t pending_hits_ = 0, hits_ = 0, misses_ = 0, probes_ = 0, host_stores_ = 0, writebacks_ = 0, write_fills_ = 0;
   // the CPU's L1 D$: lines it has written and still owns; set-associative, LRU within a set
   bool take_from_l1(uint64_t line);   // Gemmini touches `line`: true if the L1 owned it (now probed out)
   // DRAM banks (mem.dram_model = 1): open row and when the bank may activate again

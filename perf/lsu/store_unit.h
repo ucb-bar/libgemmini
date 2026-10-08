@@ -40,6 +40,9 @@ public:
   void accept(uint64_t rs_id, st_cmd_t c);
 
   uint64_t reads() const { return reads_; }
+  // Scratchpad banks a store is still writing (from its start to its last write-port beat): RTL store_pending +
+  // requant_pending, Scratchpad.scala:954-977. DRAM stores never count.
+  uint32_t pending_banks() const;
   cycle_t last_write() const { return last_write_; }   // requant output written into the scratchpad
 
 private:
@@ -53,13 +56,14 @@ private:
   reservation_station_t &rs_;
   size_t queue_len_;
   uint32_t dim_;
-  cycle_t lag_, rq_lat_, pipe_lat_, slack_;
+  cycle_t lag_, rq_lat_, pipe_lat_, slack_, spad_rd_interval_;
   double elems_per_read_;
   uint64_t stride_ = 0;
   std::deque<item_t> q_;
   bool reading_ = false;
   uint64_t reads_ = 0;
   cycle_t last_write_ = 0;
+  uint32_t pend_[32] = {};   // per scratchpad bank
 };
 
 }  // namespace gperf

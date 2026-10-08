@@ -41,6 +41,7 @@ void loop_matmul_t::run(uint64_t rs1, uint64_t rs2, cycle_t now, double out_byte
   l.inc_acc = (rs2 >> 8) & 1;
   const bool skip_lda = (rs2 >> 3) & 1, skip_ldb = (rs2 >> 4) & 1, skip_ex = (rs2 >> 6) & 1, skip_st = (rs2 >> 7) & 1;
   l.c_spad = (uint32_t)(rs2 >> 32);
+  l.tiled = (rs2 >> 10) & 1;   // LOOP_WS_REQUANT_TILED (:1359)
   l.out_bytes = out_bytes;
   l.start = now;
   if (!l.spad_only) {   // DRAM loop: operands land in the slot's half unless an explicit spad id is given
@@ -65,7 +66,7 @@ void loop_matmul_t::run(uint64_t rs1, uint64_t rs2, cycle_t now, double out_byte
   l.total[L_LDB] = (!l.spad_only && !skip_ldb && l.B) ? l.K * ceil_div(l.J, mbl_) : 0;
   l.total[L_EX] = skip_ex ? 0 : l.I * l.J * l.K;
   l.total[L_STC] = (!l.spad_only && !skip_st && l.C) ? l.I * stc_per_i(l.J) : 0;
-  l.total[L_STSPAD] = (l.spad_only && !skip_st) ? l.I * l.J : 0;
+  l.total[L_STSPAD] = (l.spad_only && !skip_st) ? l.I * sts_per_i(l.J) : 0;
   loops_run_++;
   if (!l.done()) active_.push_back(l);
 }
@@ -141,9 +142,20 @@ bool loop_matmul_t::make(const loop_t &l, int li, loop_kind_t k, cycle_t now, lo
     case L_STC:
     case L_STSPAD: {
       if (out_[LC_ST] >= lim_st_) return false;
-      uint32_t i, j0, blocks, group_last;
-      if (k == L_STSPAD) {
-        i = n / l.J; j0 = n % l.J; blocks = 1; group_last = j0;
+      uint32_t i, j0, blocks, group_last, chunk = 0;
+      bool terminal = false;
+      if (k == L_STSPAD) {   // group g (outer), row tile i, chunk c (inner); see sts_chunks
+        uint32_t g = 0, r = n;
+        while (r >= l.I * sts_chunks(l.J, g)) { r -= l.I * sts_chunks(l.J, g); g++; }
+        const uint32_t ch = sts_chunks(l.J, g);
+        i = r / ch;
+        chunk = r % ch;
+        j0 = 4 * g;
+        blocks = sts_group_tiles(l.J, g);
+        group_last = j0 + blocks - 1;
+        // ex_ahead (:944-949): the group's last-k tile of row i has left; the matmul's last group (with more than one
+        // group) waits for every compute (terminal_needs_drain)
+        terminal = (g + 1) * 4 >= l.J && l.J > 4;
       } else {   // chunks of stc_tiles() j tiles per (i, j group); a partial last group has fewer (:714-716)
         const uint32_t per_i = stc_per_i(l.J), ct = stc_tiles(), full = stc_chunks(mbl_);
         i = n / per_i;
@@ -155,15 +167,31 @@ bool loop_matmul_t::make(const loop_t &l, int li, loop_kind_t k, cycle_t now, lo
         group_last = g0 + gb - 1;
       }
       if (l.total[L_EX]) {   // ex-ahead: the group's last-k compute has left; the loop's last store waits for all
-        const uint32_t need = (n + 1 == l.total[k]) ? l.total[L_EX] : (l.K - 1) * l.J * l.I + group_last * l.I + i + 1;
+        const uint32_t need = (k == L_STSPAD ? terminal : n + 1 == l.total[k]) ? l.total[L_EX]
+                                                                                : (l.K - 1) * l.J * l.I + group_last * l.I + i + 1;
         if (l.next[L_EX] < need) return false;
       }
       o->local = acc_tile(i, j0);
       o->rows = dim_; o->cols = blocks * dim_;
       if (k == L_STSPAD) {
-        const uint64_t out_rows = (uint64_t)((double)l.I * l.J * dim_ * dim_ * l.out_bytes / dim_ + 0.5);
-        o->dst = local_addr_t{l.c_spad};
-        o->out_span = make_span(o->dst, out_rows, true);
+        o->cols = blocks * dim_ / sts_chunks(l.J, j0 / 4);   // this chunk's share of the group's data
+        o->rs_span = make_span(acc_tile(i, j0), dim_, false);
+        // This chunk's destination and RS range, as LoopMatmulStCSpad (:854-918) + ReservationStation.scala:312-325
+        // give them (single throughput): BF16 (fmt 3) rows of J/2*4 spad rows each, range (rows-1)*step + 8;
+        // FP8 flat (step J/2*2) or gated tiled (step 1), range rows*step + 16.
+        const uint32_t g = j0 / 4, tpb = tiles_per_mx_block_;
+        uint32_t off, cstride, step, range;
+        if (l.out_bytes >= 2.0) {
+          off = i * l.J * dim_ * 2 + g * (dim_ / 2); cstride = 2 * tpb; step = l.J / 2 * 4;
+          range = (dim_ - 1) * step + 8;
+        } else {
+          off = l.tiled ? i * l.J * dim_ + g * dim_ * 4 : i * l.J * dim_ + g * 4;
+          cstride = l.tiled ? dim_ * tpb : 2;
+          step = l.tiled ? 1 : l.J / 2 * 2;
+          range = dim_ * step + 16;
+        }
+        o->dst = local_addr_t{l.c_spad + off + chunk * cstride};
+        o->out_span = make_span(o->dst, range, true);
       } else {
         o->dram = l.C + (uint64_t)(((double)i * dim_ * l.C_stride + (double)j0 * dim_) * l.out_bytes);
         // The RTL gives every chunk of (i, j group) the group's acc address and packed cols = tiles * DIM/4 (<= DIM:

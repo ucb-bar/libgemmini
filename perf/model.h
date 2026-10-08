@@ -82,6 +82,7 @@ private:
   bool may_pass(const rocc_cmd_t &c) const;
   uint64_t rs_alloc(rs_cmd_t c);
   uint32_t bank_mask(const span_t &s) const;
+  span_t preload_c_span(local_addr_t c) const;
 
   config_t cfg_;
   event_queue_t eq_;

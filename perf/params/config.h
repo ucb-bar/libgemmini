@@ -54,11 +54,12 @@
   X(loop, max_ex_outstanding,       16,   "loop-issued ex commands in the RS, not completed") \
   X(loop, max_st_outstanding,       4,    "loop-issued stores in the RS, not completed") \
   /* --- reservation station (ReservationStation.scala; entries ConfigsFP.scala:232-234) --- */ \
+  X(rs, vec_pending_gate,           1,    "[knob] a vector entry waits while a scratchpad bank it touches has store rows in flight (io.vpu_pending_banks, ReservationStation.scala:574-578)") \
+  X(rs, packed_preload_align,       0,    "[knob, RTL version] packed MX acc: a preload's C range starts at its DIM-row group (no spill into the next row group's stores: ReservationStation.scala:302-307, commit b0dd6cb 2026-10-05). 0 = older RTL (MxGemminiRocketConfig sim of 09-29: the spill and its store/mesh stalls are real, 13.5); presets e4m3_vpu / firesim: 1") \
   X(rs, ld_entries,                 8,    "load queue entries") \
   X(rs, ex_entries,                 16,   "execute queue entries") \
   X(rs, st_entries,                 4,    "store queue entries") \
   X(rs, vec_entries,                16,   "vector (VPU / SPAD_REQUANT) queue entries; only with a VPU") \
-  X(rs, packed_exact,               0,    "[what-if, not the RTL] packed MX acc: a loop preload's C range and a loop spad store's source range are the tile's own DIM/4 rows (RTL: DIM rows, so a store blocks the next tiles' preloads)") \
   /* --- mesh / execute (ExecuteController.scala, MeshWithDelays.scala) --- */ \
   X(mesh, dim,                      16,   "mesh rows = cols = DIM; must match the kernel build") \
   X(ex, queue_length,               8,    "issued ex commands waiting in the ExecuteController queue (:229)") \
@@ -89,6 +90,7 @@
   X(st, queue_length,               2,    "issued stores waiting in the StoreController queue (:230)") \
   X(st, completion_lag,             2,    "last acc/spad read issued -> RS completion (stores complete early)") \
   X(st, requant_latency,            4,    "acc read -> requantizer output -> writer") \
+  X(st, spad_read_interval,        4,    "[measured] acc -> scratchpad store (requant_to_spad): one acc read per 4 cycles -- a read is accepted only after the previous result's two bank-row writes (dma_resp_ready, Scratchpad.scala:1127-1131; attn_flash_llama_2h_fused FSDB: 24 reads, ready 1 cycle in 4, mesh idle)") \
   X(st, pipe_latency,               12,   "store command issued -> its first Put (128x128 FSDB: mvout -> first Put 13)") \
   X(st, write_slack,                8,    "Puts of a store still waiting for the bus when the next store may start (write queues)") \
   X(st, elems_per_acc_read,         32,   "output elements per accumulator read / requantizer beat") \
@@ -106,6 +108,8 @@
   X(mem, l2_kib,                    512,  "L2 capacity (lines start cold)") \
   X(mem, l2_hit_latency,            12,   "Get accepted -> data, L2 hit: mx_mem_bw B_warm_16B lat_req 12") \
   X(mem, client_hit_latency,        10,   "same, for the MX scale / LUT loaders' own client: mx_mem_bw scale_warm (8 slots, 64 Gets, 85 cyc)") \
+  X(mem, l2_miss_detect,            6,    "[measured] Get/Put accepted -> the L2's AcquireBlock to DRAM on a miss (llama_e2e_elemwise FSDB: 6, p90 7)") \
+  X(mem, l2_fill_to_data,           7,    "[measured] the fill's last DRAM beat -> the first data back to the requester (same: median 7)") \
   X(mem, dram_latency,              20,   "DRAM, unloaded, after its line slot: L2 DRAM-side median 23 (MLP down-loop FSDB); loaded latency is queueing") \
   X(mem, dram_model,                0,    "[knob, optional] 0 = fixed pipe (latency + line slot); 1 = + open-row banks (DRAMSim2 DDR3, testchipip dramsim2_ini). Changes the regression < 1% (13.8)") \
   X(mem, dram_banks,                8,    "[knob] DDR3 NUM_BANKS; scheme2 mapping: bank = line % banks") \
@@ -118,7 +122,8 @@
   X(mem, write_ack_latency,         22,   "[measured] PutPartial accepted -> ack, first Put to an idle line the L2 holds (chain_pipelined FSDB: +18..28)") \
   X(mem, full_write_ack_latency,    10,   "[measured] PutFull accepted -> ack, line not in the CPU's L1: 190 unprobed dramloop Puts, median 10") \
   X(mem, l2_put_serial_cycles,      8,    "[measured] Puts to the same line are handled one at a time, one per 8 cycles (chain FSDB: same-line acks +22/+30/+38/+46)") \
-  X(mem, l2_fill_secondary_cycles,  16,   "[approximation] requests that wait on a line's fill resume one per 16 cycles after it lands (Puts: mx_mem_bw mvout_16B ~16; Gets: MLP G,U second touches +43 vs first)") \
+  X(mem, l2_fill_secondary_first,   38,   "[measured] requests queued behind a line's fill: the first is served this long after the fill lands (7 to the primary's data + 31; llama_e2e_elemwise FSDB, 74 lines)") \
+  X(mem, l2_fill_secondary_next,    10,   "[measured] ... and each further one this much later (12, then 8)") \
   X(mx, block,                      32,   "elements per E8M0 scale block (scaleSize, ConfigsFP.scala:278)") \
   /* --- scale loader, outside the RS (Controller.scala:542-721) --- */ \
   X(scale, start_q,                 4,    "MX_LOAD_SCALES commands queued in the loader") \
