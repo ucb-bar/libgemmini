@@ -54,6 +54,7 @@ private:
   size_t queue_len_;
   uint32_t dim_, min_rows_;
   cycle_t issue_lat_, fill_lat_, commit_lat_, drain_extra_, lone_preload_;
+  bool overwrite_blocks_;   // acc.overwrite_blocks_reads
   std::deque<item_t> q_;
   bool busy_now_ = false;          // a tile is feeding or a config is draining
   int tiles_in_flight_ = 0;        // fed, not yet committed

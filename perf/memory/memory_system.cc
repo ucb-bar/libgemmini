@@ -1,3 +1,5 @@
+#include <cstdio>
+#include <cstdlib>
 #include "memory_system.h"
 
 #include <algorithm>
@@ -22,6 +24,21 @@ memory_system_t::memory_system_t(const config_t &c, event_queue_t &eq)
       probe_lat_((cycle_t)c.mem_probe_latency), probe_put_ack_((cycle_t)c.mem_probe_put_ack_latency) {
   l1_sets_ = std::max<uint32_t>(1, (uint32_t)(c.mem_host_l1_kib * 1024 / c.mem_line_bytes / l1_ways_));
   l1_lru_.resize(l1_sets_);
+  l2_ways_ = (uint32_t)std::max(0.0, c.mem_l2_ways);
+  if (l2_ways_) {
+    l2_sets_n_ = std::max<uint32_t>(1, (uint32_t)(capacity_lines_ / l2_ways_));
+    l2_set_.resize(l2_sets_n_);
+    if (c.mem_l2_start_full)   // placeholder ids (never addresses: top of the space), clean, map to their own set
+      for (uint32_t s = 0; s < l2_sets_n_; s++)
+        for (uint32_t w = 0; w < l2_ways_; w++) {
+          const uint64_t ph = (~(uint64_t)0 >> 8) - ((uint64_t)w * l2_sets_n_ + s);
+          const uint64_t id = ph - (ph % l2_sets_n_) + s;
+          l2_set_[s].push_back(id);
+          lru_.push_front(id);
+          line_t &l = lines_[id];
+          l.pos = lru_.begin(); l.ready = 0; l.dirty = false;
+        }
+  }
   miss_detect_ = (cycle_t)c.mem_l2_miss_detect;
   fill_to_data_ = (cycle_t)c.mem_l2_fill_to_data;
   if (c.mem_host_tracking >= 2) {
@@ -147,18 +164,46 @@ void memory_system_t::probe(uint64_t line, cycle_t g, bool write, done_t done) {
   });
 }
 
+void memory_system_t::evict(uint64_t victim) {
+  auto it = lines_.find(victim);
+  if (it == lines_.end()) return;
+  if (it->second.dirty) {   // write-back: a DRAM line slot nobody waits for
+    writebacks_++;
+    trace_ev_addr("l2wb", eq_.now(), (unsigned long long)victim * line_bytes_);
+    dram_.request(0, eq_.now(), dram_cycles_per_line_, [](cycle_t) {});
+  }
+  lru_.erase(it->second.pos);
+  lines_.erase(it);
+}
+
 void memory_system_t::insert(uint64_t line, cycle_t ready, bool dirty) {
+  if (l2_ways_) {   // set-associative: a full set gives up a pseudo-random way with no fill outstanding
+    auto &set = l2_set_[line % l2_sets_n_];
+    if (set.size() >= l2_ways_) {
+      l2_lfsr_ ^= l2_lfsr_ << 13; l2_lfsr_ ^= l2_lfsr_ >> 7; l2_lfsr_ ^= l2_lfsr_ << 17;
+      for (size_t k = 0; k < set.size(); k++) {
+        const size_t w = (size_t)((l2_lfsr_ + k) % set.size());
+        auto vt = lines_.find(set[w]);
+        if (vt != lines_.end() && vt->second.ready == NEVER) continue;   // its fill is outstanding
+        evict(set[w]);
+        set.erase(set.begin() + (long)w);
+        break;
+      }
+    }
+    set.push_back(line);
+  }
   lru_.push_front(line);
   line_t &l = lines_[line];
   l.pos = lru_.begin();
   l.ready = ready;
   l.dirty = dirty;
-  if (lines_.size() > capacity_lines_) {
+  if (!l2_ways_ && lines_.size() > capacity_lines_) {
     const uint64_t victim = lru_.back();
     const line_t &v = lines_[victim];
     if (v.ready != NEVER) {   // never evict a line with a fill outstanding
       if (v.dirty) {          // write-back: a DRAM line slot nobody waits for
         writebacks_++;
+        trace_ev_addr("l2wb", eq_.now(), (unsigned long long)victim * line_bytes_);
         dram_.request(0, eq_.now(), dram_cycles_per_line_, [](cycle_t) {});
       }
       lines_.erase(victim);
@@ -204,14 +249,16 @@ cycle_t memory_system_t::dram_ready(uint64_t line, cycle_t d) {
 }
 
 void memory_system_t::fetch(uint64_t line, cycle_t t) {
+  trace_ev_addr("l2fill", t, (unsigned long long)line * line_bytes_);
   if (dram_max_reads_ && dram_reads_ >= dram_max_reads_) { dram_waiting_.push_back({line, t}); return; }
   start_fetch(line, t);
 }
 
 void memory_system_t::start_fetch(uint64_t line, cycle_t t) {
   dram_reads_++;
-  dram_.request(0, t, dram_cycles_per_line_, [this, line](cycle_t d) {
+  dram_.request(0, t, dram_cycles_per_line_, [this, line, t](cycle_t d) {
     const cycle_t r = dram_ready(line, d);
+    if (getenv("GPERF_DBG_FILL")) fprintf(stderr, "FILLLAT %lld %lld\n", (long long)t, (long long)r);
     eq_.at(r, [this, r] {   // the read's slot frees when its data is back
       dram_reads_--;
       if (!dram_waiting_.empty()) {

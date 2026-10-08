@@ -8,7 +8,7 @@ dma_reader_t::dma_reader_t(const config_t &c, event_queue_t &eq, memory_system_t
     : eq_(eq), mem_(mem), sp_(sp), get_bytes_((uint32_t)c.dma_get_bytes),
       max_in_flight_((uint32_t)c.dma_max_in_flight),
       row_bytes_per_cycle_((uint32_t)c.dma_spad_write_bytes_per_cycle),
-      interval_((cycle_t)std::ceil(1.0 / c.dma_gets_per_cycle)) {}
+      interval_((cycle_t)std::ceil(1.0 / c.dma_gets_per_cycle)), ooo_(c.dma_ooo_free != 0) {}
 
 void dma_reader_t::submit(uint64_t addr, uint32_t rows, uint32_t row_bytes, uint64_t stride, uint32_t spad_row,
                           done_t done) {
@@ -30,6 +30,7 @@ void dma_reader_t::submit(uint64_t addr, uint32_t rows, uint32_t row_bytes, uint
     return;
   }
   to_issue_.back().last = true;
+  job_left_[job] = (uint32_t)(to_issue_.size() - first);
   try_issue();
 }
 
@@ -52,10 +53,31 @@ void dma_reader_t::try_issue() {
     get_t &e = issued_[(size_t)(seq - base_seq_)];
     e.back = t;
     lat_sum_ += (uint64_t)(t - e.sent);
+    if (ooo_) { pack(seq); return; }
     try_merge();
   }, "get", false, [this, seq](cycle_t gr) {
     issued_[(size_t)(seq - base_seq_)].sent = gr;
     next_issue_ = gr + interval_ - 1;   // gr = the end of the accepted cycle
+    try_issue();
+  });
+}
+
+// The beat packer takes responses as they arrive: write the row, free the tracker slot, and complete the job with
+// its last written Get.
+void dma_reader_t::pack(uint64_t seq) {
+  const get_t &g = issued_[(size_t)(seq - base_seq_)];
+  const cycle_t cycles = (g.useful + row_bytes_per_cycle_ - 1) / row_bytes_per_cycle_;
+  const uint64_t job = g.job;
+  sp_.write_port(g.spad_row).request(SP_MVIN, eq_.now(), cycles, [this, job, seq](cycle_t t) {
+    in_flight_--;
+    issued_[(size_t)(seq - base_seq_)].packed = true;
+    while (!issued_.empty() && issued_.front().packed) { issued_.pop_front(); base_seq_++; }
+    if (--job_left_[job] == 0) {
+      job_left_.erase(job);
+      done_t d = std::move(jobs_[job]);
+      jobs_.erase(job);
+      d(t);
+    }
     try_issue();
   });
 }

@@ -9,7 +9,8 @@ execute_unit_t::execute_unit_t(const config_t &c, event_queue_t &eq, scratchpad_
     : eq_(eq), sp_(sp), acc_(acc), rs_(rs), queue_len_((size_t)c.ex_queue_length), dim_((uint32_t)c.mesh_dim),
       min_rows_((uint32_t)c.mesh_min_rows), issue_lat_((cycle_t)c.mesh_issue_latency),
       fill_lat_((cycle_t)c.mesh_fill_latency), commit_lat_((cycle_t)c.mesh_commit_latency),
-      drain_extra_((cycle_t)c.mesh_drain_extra), lone_preload_((cycle_t)c.mesh_lone_preload_cycles) {}
+      drain_extra_((cycle_t)c.mesh_drain_extra), lone_preload_((cycle_t)c.mesh_lone_preload_cycles),
+      overwrite_blocks_(c.acc_overwrite_blocks_reads != 0) {}
 
 void execute_unit_t::accept(uint64_t rs_id, ex_cmd_t c) {
   q_.push_back({rs_id, std::move(c)});
@@ -82,7 +83,9 @@ void execute_unit_t::run_tile(const item_t *pre, const item_t &comp) {
     tiles_++;
     rs_.complete(comp_id);
     const cycle_t first_out = t - rows + fill_lat_, commit = t - rows + commit_lat_;
-    if (!c.garbage()) acc_.port(c.row()).request(ACC_MESH, first_out, rows, [](cycle_t) {});
+    // an accumulating write reads the bank (read-modify-write) and holds its read port; an overwrite does not
+    if (!c.garbage() && (overwrite_blocks_ || ((c.raw >> 30) & 1)))
+      acc_.port(c.row()).request(ACC_MESH, first_out, rows, [](cycle_t) {});
     tiles_in_flight_++;
     eq_.at(commit, [this, pre_id] {
       if (pre_id) rs_.complete(pre_id);

@@ -75,6 +75,7 @@
   /* --- accumulator (AccumulatorMem.scala; ConfigsFP.scala:245,343) --- */ \
   X(acc, banks,                     2,    "accumulator banks: stores read one bank while the mesh writes the other") \
   X(acc, bank_rows,                 256,  "accumulator rows per bank") \
+  X(acc, overwrite_blocks_reads,    0,    "[knob, RTL] 0: only an ACCUMULATING mesh write holds the bank's read port (AccumulatorMem.scala:667: read.req.ready = !(write.valid && write.acc)); an overwriting tile leaves store reads alone. 1 = every tile holds it (older model)") \
   X(acc, total_rows,                512,  "max_acc_addr: loop C bases alternate by total_rows / concurrent_loops") \
   /* --- load path (LoadController.scala, DMA.scala StreamReader, BeatMerger.scala) --- */ \
   X(ld, queue_length,               8,    "issued mvins waiting in the LoadController queue (ConfigsFP.scala:228)") \
@@ -83,12 +84,16 @@
   X(dma, get_bytes,                 64,   "bytes per TileLink Get (dma_maxbytes; 64-aligned)") \
   X(dma, gets_per_cycle,            1,    "Gets the StreamReader issues per cycle") \
   X(dma, max_in_flight,             32,   "outstanding Gets (max_in_flight_mem_reqs)") \
+  X(dma, ooo_free,                  1,    "[knob, RTL] 1: a response is packed into the scratchpad when it arrives and frees its tracker slot then (XactTracker pop on the beat packer's last beat, DMA.scala:84-85: arrival order); 0: merged and freed in request order (older model)") \
   X(dma, spad_write_bytes_per_cycle,16,   "BeatMerger: one DIM-byte spad row per cycle") \
   X(dma, put_bytes,                 64,   "bytes per TileLink Put") \
   X(dma, max_puts_in_flight,        32,   "outstanding Puts (StreamWriter)") \
   /* --- store path (StoreController.scala, Scratchpad.scala write path, MxRequantizer.scala) --- */ \
   X(st, queue_length,               2,    "issued stores waiting in the StoreController queue (:230)") \
   X(st, completion_lag,             2,    "last acc/spad read issued -> RS completion (stores complete early)") \
+  X(st, pending_delay,              3,    "[measured] store issued -> its banks count in vpu_pending_banks: write_norm_q enq +2 (perf_st_pending_delay.py), +1 register. A vector entry issuing within it wins the bank (attn_flash_llama7b_fused_fp4 tail)") \
+  X(st, pending_tail,               11,   "[measured] acc -> scratchpad store: its read side done -> its banks leave vpu_pending_banks (RS completion +127, write_issue_q drained +138 after issue)") \
+  X(st, spad_write_lead,            4,    "[measured] acc -> scratchpad store: read -> its rows' bank write (write_norm_q enq +3, one 4-row request per 4 cycles; perf_sig_runs.py)") \
   X(st, requant_latency,            4,    "acc read -> requantizer output -> writer") \
   X(st, spad_read_interval,        4,    "[measured] acc -> scratchpad store (requant_to_spad): one acc read per 4 cycles -- a read is accepted only after the previous result's two bank-row writes (dma_resp_ready, Scratchpad.scala:1127-1131; attn_flash_llama_2h_fused FSDB: 24 reads, ready 1 cycle in 4, mesh idle)") \
   X(st, pipe_latency,               12,   "store command issued -> its first Put (128x128 FSDB: mvout -> first Put 13)") \
@@ -105,7 +110,9 @@
   X(mem, probe_cycles,              7,    "[measured] the L1 (blocking, nMSHRs = 0) takes one probe per 7 cycles: dramloop FSDB, 292 of 304 probe gaps") \
   X(mem, probe_latency,             19,   "[measured] probe -> ProbeAckData back at the L2: 19 for 301 of 301 (dramloop FSDB)") \
   X(mem, probe_put_ack_latency,     7,    "[measured] ProbeAckData -> the probed Put's ack (dramloop FSDB: median 7)") \
-  X(mem, l2_kib,                    512,  "L2 capacity (lines start cold)") \
+  X(mem, l2_kib,                    512,  "[knob] L2 capacity (lines start cold)") \
+  X(mem, l2_start_full,             1,    "[approximation] with l2_ways > 0: the L2 starts full of clean lines from before the kernel (boot, load), so random replacement evicts kernel lines from the first fills (llama_e2e_elemwise FSDB: first eviction after 79 fills; h_pre half evicted before its re-read)") \
+  X(mem, l2_ways,                   8,    "[knob] L2 associativity: InclusiveCache 512 KB x 8 ways (1 bank: 1024 sets), victim chosen by an LFSR (Directory.scala:114-120). 0 = fully associative LRU (the older approximation)") \
   X(mem, l2_hit_latency,            12,   "Get accepted -> data, L2 hit: mx_mem_bw B_warm_16B lat_req 12") \
   X(mem, client_hit_latency,        10,   "same, for the MX scale / LUT loaders' own client: mx_mem_bw scale_warm (8 slots, 64 Gets, 85 cyc)") \
   X(mem, l2_miss_detect,            6,    "[measured] Get/Put accepted -> the L2's AcquireBlock to DRAM on a miss (llama_e2e_elemwise FSDB: 6, p90 7)") \

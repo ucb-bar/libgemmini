@@ -19,7 +19,8 @@ namespace gperf {
 // once every older store has completed. The vec queue is out of order (:470-500, :556-575): the oldest READY entry
 // issues, VPU commands run side by side and next to SPAD_REQUANT; a vector entry waits for older vector entries it
 // conflicts with by rows, that read one of its scratchpad banks (each bank has one VPU read port), or -- for
-// SPAD_REQUANT -- any older SPAD_REQUANT and any older quantized store (shared requantizer). Across queues an entry
+// SPAD_REQUANT -- any older SPAD_REQUANT and any older non-BF16 store (shared requantizer); such a store and an
+// act-half-0 CONFIG_SCALE_MEM wait for any older SPAD_REQUANT. Across queues an entry
 // waits for every older live entry whose rows overlap its own where either side writes; that dependency clears
 // when the older one completes. Configs outside the ex queue complete on issue.
 struct rs_cmd_t {
@@ -32,7 +33,11 @@ struct rs_cmd_t {
   int vec = 0;                               // vector queue: 1 = VPU_EXEC, 2 = SPAD_REQUANT
   uint32_t read_banks = 0;                   // vector entries: scratchpad banks it reads (one VPU read port each)
   uint32_t sp_banks = 0;                     // vector entries: every scratchpad bank of a, b, c, d (entry_sp_banks)
-  bool quantized_store = false;              // a store through the requantizer to a non-BF16 format
+  // A store other than a BF16 scratchpad store (StCSpad rs2[63]): raw mvouts, DRAM loop stores, quantized spad
+  // stores. It and SPAD_REQUANT are ordered both ways (requantizer / scale coalescer, ReservationStation.scala:503-520)
+  bool sr_ordered_store = false;
+  bool scale_cfg_act0 = false;               // CONFIG_SCALE_MEM that may read act half 0: after an older SPAD_REQUANT
+  bool fp4_sr = false;                       // an FP4 SPAD_REQUANT (rs2[32]): owns the requantizer alone
   const char *what = "";
 };
 
@@ -54,6 +59,9 @@ public:
     trace_cb_ = std::move(cb);
   }
 
+  // An FP4 SPAD_REQUANT is the next thing for its unit: ready, not issued, its banks free (vec_sr_fp4_waiting,
+  // ReservationStation.scala, commit d3e6df6). The accumulator side then sends no new beats (Controller sr_fp4_hold).
+  bool fp4_sr_waiting() const;
   bool idle() const { return ents_.empty(); }
   std::string describe() const;   // live entries per queue, for diagnostics
   cycle_t last_complete() const { return last_complete_; }

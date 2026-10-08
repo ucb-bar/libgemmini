@@ -21,6 +21,8 @@ model_t::model_t(const config_t &c)
   rs_.on_done([this](int tag) { loops_.completed(tag); kick_at(eq_.now()); });
   scales_.on_room([this] { kick_at(eq_.now()); });
   if (c.rs_vec_pending_gate) rs_.on_vec_pending([this] { return store_.pending_banks(); });
+  store_.on_acc_hold([this] { return rs_.fp4_sr_waiting() || sreq_.fp4_active(); });
+  sreq_.on_done([this] { store_.process(); });
   if (c.mem_host_tracking >= 2 && c.host_icache && c.host_core_model) core_.reset(new host_core_t(c));
   if (const char *p = getenv("GEMMINI_PERF_REPLAY")) {
     if (!host_.load_replay(p)) { fprintf(stderr, "gemmini perf: cannot read GEMMINI_PERF_REPLAY=%s\n", p); abort(); }
@@ -89,7 +91,7 @@ void model_t::step() {
     front_.pop();
     taken_++;
     last_taken_ = now;
-    if (c.funct == 8) loops_.run(c.rs1, c.rs2, now, out_bytes_, cfg_reads_act0_);
+    if (c.funct == 8) loops_.run(c.rs1, c.rs2, now, out_bytes_, cfg_reads_act0_, mx_multi_, mx_multi_act_);
     else loops_.config(c.funct, c.rs1, c.rs2);
     progress = true;
   }
@@ -222,6 +224,7 @@ bool model_t::issue_loop(const loop_cmd_t &c) {
       r.config = true;
       r.tag = LC_EX;
       r.what = "loop_scale_cfg";
+      r.scale_cfg_act0 = c.half == 0;   // managed config of act half 1 skips the SR order (:492)
       r.unit_has_room = [this] { return exec_.has_room(); };
       const int h = c.half;
       const bool reuse = c.a_reuse;
@@ -263,11 +266,12 @@ bool model_t::issue_loop(const loop_cmd_t &c) {
       s.stride = c.stride;
       s.dst = c.dst;
       s.out_bytes = c.out_bytes;
+      s.out_mult = c.out_mult;
       rs_cmd_t r;
       r.q = Q_ST;
       r.a = c.rs_span;   // L_STC and L_STSPAD both carry the RTL's range
       r.b = c.out_span;
-      r.quantized_store = c.out_bytes < 2.0;
+      r.sr_ordered_store = c.kind == L_STC || c.out_bytes < 2.0;   // a BF16 StCSpad store sets rs2[63]
       r.tag = LC_ST;
       r.what = c.kind == L_STC ? "loop_stc" : "loop_stspad";
       r.unit_has_room = [this] { return store_.has_room(); };
@@ -292,6 +296,8 @@ bool model_t::issue_raw(const rocc_cmd_t &cmd) {
     rs_cmd_t r;
     // a CONFIG_SCALE_MEM that bypassed the loops counts in their ex utilization until it completes (:1440-1446)
     if (passing_ && f == 26) r.tag = LC_EX;
+    if (f == 3) r.sr_ordered_store = true;   // raw mvout
+    if (f == 26) r.scale_cfg_act0 = !(((rs2 >> 17) & 1) && ((rs1 >> 60) & 1) && !((rs1 >> 63) & 1));
     r.q = q;
     r.a = a;
     r.b = b;
@@ -308,7 +314,15 @@ bool model_t::issue_raw(const rocc_cmd_t &cmd) {
       const unsigned type = rs1 & 3;
       if (type == 0) {
         if (!rs_.has_room(Q_EX)) return false;
-        if (!((rs1 >> 7) & 1)) out_bytes_ = out_fmt_bytes((rs1 >> 14) & 3);
+        if (!((rs1 >> 7) & 1)) {
+          out_bytes_ = out_fmt_bytes((rs1 >> 14) & 3);
+          // mx_multi_elem(_act), ExecuteController.scala:177-187: an FP6/FP4 (format != 0) or E5M2 (altfmt) weight /
+          // activation is quad. The LUT-enabled E4M3 quad case is not modelled (the VPU presets have no LUT).
+          const uint32_t wfmt = (rs1 >> 12) & 3, afmt = (rs1 >> 10) & 3, alt = (rs1 >> 6) & 1;
+          const uint32_t walt = alt ^ ((rs1 >> 31) & 1);
+          mx_multi_ = wfmt != 0 || walt;
+          mx_multi_act_ = afmt != 0 || alt;
+        }
         return rs_cmd(Q_EX, none, none, true, "config_ex", [this] { return exec_.has_room(); }, [this](uint64_t id) {
           execute_unit_t::ex_cmd_t e;
           e.kind = execute_unit_t::ex_cmd_t::CONFIG;
@@ -418,7 +432,10 @@ bool model_t::issue_raw(const rocc_cmd_t &cmd) {
       r.b = sreq_.write_span(s);
       r.read_banks = bank_mask(r.a);
       r.sp_banks = bank_mask(r.a) | bank_mask(r.b);
-      r.unit_has_room = [this] { return sreq_.has_room(); };
+      r.fp4_sr = s.fp4;
+      // FP4 never shares the requantizer: it starts once no accumulator beat is in flight (sr_free_fp4)
+      if (s.fp4) r.unit_has_room = [this] { return sreq_.has_room() && !store_.acc_reading(); };
+      else r.unit_has_room = [this] { return sreq_.has_room(); };
       r.start = [this, s](uint64_t id) { sreq_.accept(id, s); };
       rs_alloc(std::move(r));
       return true;

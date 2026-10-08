@@ -30,9 +30,10 @@ public:
   double mean_latency() const { return gets_ ? (double)lat_sum_ / (double)gets_ : 0; }   // Get accepted -> data
 
 private:
-  struct get_t { uint64_t addr; uint32_t useful, spad_row; uint64_t job; bool last; cycle_t back = NEVER; cycle_t sent = 0; };
+  struct get_t { uint64_t addr; uint32_t useful, spad_row; uint64_t job; bool last; cycle_t back = NEVER; cycle_t sent = 0; bool packed = false; };
   void try_issue();
   void try_merge();
+  void pack(uint64_t seq);
 
   event_queue_t &eq_;
   memory_system_t &mem_;
@@ -43,6 +44,8 @@ private:
   std::deque<get_t> to_issue_, issued_;   // issued_: in request order, merged from the front
   uint64_t base_seq_ = 0, next_job_ = 0;
   std::unordered_map<uint64_t, done_t> jobs_;
+  std::unordered_map<uint64_t, uint32_t> job_left_;   // ooo_free: Gets of the job not yet written
+  bool ooo_;
   uint32_t in_flight_ = 0;
   cycle_t next_issue_ = 0;
   bool issue_pending_ = false, merging_ = false;

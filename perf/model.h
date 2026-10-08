@@ -107,6 +107,7 @@ private:
 
   uint32_t dim_;
   double out_bytes_ = 2.0;       // config_ex out_fmt, as the stream sees it
+  bool mx_multi_ = false, mx_multi_act_ = false;   // config_ex: quad weight / activation (FP4/FP6/E5M2)
   bool cfg_reads_act0_ = true;   // the last raw CONFIG_SCALE_MEM may read act scale half 0
   cycle_t last_out_ = -1;        // one command per cycle leaves LoopMatmul
   cycle_t step_at_ = NEVER;

@@ -20,6 +20,10 @@ inline FILE *&trace_file() {
 inline void trace_ev(const char *kind, cycle_t t) {
   if (FILE *f = trace_file()) fprintf(f, "ev,%s,%lld\n", kind, (long long)t);
 }
+//   l2fill / l2wb       the L2 fetches a line from DRAM / writes a dirty line back (with the line's byte address)
+inline void trace_ev_addr(const char *kind, cycle_t t, unsigned long long addr) {
+  if (FILE *f = trace_file()) fprintf(f, "ev,%s,%lld,%llx\n", kind, (long long)t, addr);
+}
 
 }  // namespace gperf
 

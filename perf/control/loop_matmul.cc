@@ -32,7 +32,8 @@ void loop_matmul_t::config(unsigned funct, uint64_t rs1, uint64_t rs2) {
   }
 }
 
-void loop_matmul_t::run(uint64_t rs1, uint64_t rs2, cycle_t now, double out_bytes, bool reads_act0) {
+void loop_matmul_t::run(uint64_t rs1, uint64_t rs2, cycle_t now, double out_bytes, bool reads_act0, bool multi,
+                        bool multi_act) {
   loop_t l = cfg_;
   cfg_.A_sc = cfg_.B_sc = 0;   // loop-managed scales are per loop
   l.slot = (uint32_t)(loops_run_ % (uint64_t)max_loops_);
@@ -43,6 +44,9 @@ void loop_matmul_t::run(uint64_t rs1, uint64_t rs2, cycle_t now, double out_byte
   l.c_spad = (uint32_t)(rs2 >> 32);
   l.tiled = (rs2 >> 10) & 1;   // LOOP_WS_REQUANT_TILED (:1359)
   l.out_bytes = out_bytes;
+  l.multi = multi;
+  l.multi_act = multi_act;
+  l.ex_acc = rs1 & 1;
   l.start = now;
   if (!l.spad_only) {   // DRAM loop: operands land in the slot's half unless an explicit spad id is given
     const uint32_t a_id = (rs1 >> 18) & 3, b_id = (rs1 >> 16) & 3;
@@ -66,7 +70,8 @@ void loop_matmul_t::run(uint64_t rs1, uint64_t rs2, cycle_t now, double out_byte
   l.total[L_LDB] = (!l.spad_only && !skip_ldb && l.B) ? l.K * ceil_div(l.J, mbl_) : 0;
   l.total[L_EX] = skip_ex ? 0 : l.I * l.J * l.K;
   l.total[L_STC] = (!l.spad_only && !skip_st && l.C) ? l.I * stc_per_i(l.J) : 0;
-  l.total[L_STSPAD] = (l.spad_only && !skip_st) ? l.I * sts_per_i(l.J) : 0;
+  // multi-elem: one store per (i, j) tile, no chunks (LoopMatmulStCSpad iter_max_j = max_j, :822, :961)
+  l.total[L_STSPAD] = (l.spad_only && !skip_st) ? l.I * (l.multi ? l.J : sts_per_i(l.J)) : 0;
   loops_run_++;
   if (!l.done()) active_.push_back(l);
 }
@@ -76,8 +81,8 @@ bool loop_matmul_t::make(const loop_t &l, int li, loop_kind_t k, cycle_t now, lo
   if (n >= l.total[k] || now <= l.start) return false;
   const uint32_t Jg = ceil_div(l.J, mbl_), J4 = ceil_div(l.J, 4) * 4;
   const uint32_t b_sp = l.b_end - l.K * l.J * dim_;
-  auto acc_tile = [&](uint32_t i, uint32_t j) {
-    return local_addr_t{(1u << 31) | (l.acc_base + (i * J4 + j) * (dim_ / 4))};   // single throughput (:407)
+  auto acc_tile = [&](uint32_t i, uint32_t j) {   // packed single throughput, or one DIM-row tile (narrow, :407)
+    return local_addr_t{(1u << 31) | (l.acc_base + (l.multi ? (i * l.J + j) * dim_ : (i * J4 + j) * (dim_ / 4)))};
   };
   *o = loop_cmd_t{};
   o->kind = k;
@@ -91,7 +96,7 @@ bool loop_matmul_t::make(const loop_t &l, int li, loop_kind_t k, cycle_t now, lo
       o->dram = is_b ? l.B_sc : l.A_sc;
       o->stride = is_b ? l.B_sc_stride : l.A_sc_stride;
       o->rows = l.K / tiles_per_mx_block_;
-      o->len = (is_b ? l.J : l.I) * dim_;
+      o->len = (is_b ? l.J << l.multi : l.I << l.multi_act) * dim_;   // a quad tile has twice the scales (:1548)
       return true;
     }
     case L_SCFG:   // the loop's managed CONFIG_SCALE_MEM: after its scale loads have left
@@ -136,6 +141,7 @@ bool loop_matmul_t::make(const loop_t &l, int li, loop_kind_t k, cycle_t now, lo
       o->a = local_addr_t{l.a_sp + (i * l.K + kk) * dim_};
       o->b = i == 0 ? local_addr_t{b_sp + (kk * l.J + j) * dim_} : local_addr_t{0xFFFFFFFFu};
       o->c = acc_tile(i, j);
+      if (l.ex_acc || kk) o->c.raw |= 1u << 30;   // accumulate (:435)
       o->rows = dim_;
       return true;
     }
@@ -144,7 +150,13 @@ bool loop_matmul_t::make(const loop_t &l, int li, loop_kind_t k, cycle_t now, lo
       if (out_[LC_ST] >= lim_st_) return false;
       uint32_t i, j0, blocks, group_last, chunk = 0;
       bool terminal = false;
-      if (k == L_STSPAD) {   // group g (outer), row tile i, chunk c (inner); see sts_chunks
+      if (k == L_STSPAD && l.multi) {   // one store per tile, j outer, i inner (:956-966); ej_high = j
+        i = n % l.I;
+        j0 = n / l.I;
+        blocks = 1;
+        group_last = j0;
+        terminal = j0 + 1 == l.J && l.J > 1;
+      } else if (k == L_STSPAD) {   // group g (outer), row tile i, chunk c (inner); see sts_chunks
         uint32_t g = 0, r = n;
         while (r >= l.I * sts_chunks(l.J, g)) { r -= l.I * sts_chunks(l.J, g); g++; }
         const uint32_t ch = sts_chunks(l.J, g);
@@ -173,7 +185,23 @@ bool loop_matmul_t::make(const loop_t &l, int li, loop_kind_t k, cycle_t now, lo
       }
       o->local = acc_tile(i, j0);
       o->rows = dim_; o->cols = blocks * dim_;
-      if (k == L_STSPAD) {
+      if (k == L_STSPAD && l.multi) {
+        // LoopMatmulStCSpad mx_multi_elem (:854-918): src (i*J + j)*DIM, DIM x DIM acc elements, each 2 (x2) outputs;
+        // BF16 dst i*J*DIM*(4|8) + 4j, step J*(4|8), range (rows-1)*step + 8; FP8 flat i*J*DIM*2 + 2j (tiled
+        // + 32j, step 1), step J*2, range rows*step + 16 (ReservationStation.scala:312-325)
+        o->out_mult = (l.multi_act ? 2u : 1u) * 2u;
+        o->rs_span = make_span(acc_tile(i, j0), dim_, false);
+        uint32_t off, step, range;
+        if (l.out_bytes >= 2.0) {
+          const uint32_t h = l.multi_act ? 8 : 4;
+          off = i * l.J * dim_ * h + j0 * 4; step = l.J * h; range = (dim_ - 1) * step + 8;
+        } else {
+          off = i * l.J * dim_ * 2 + j0 * (l.tiled ? dim_ * 2 : 2); step = l.tiled ? 1 : l.J * 2;
+          range = dim_ * step + 16;
+        }
+        o->dst = local_addr_t{l.c_spad + off};
+        o->out_span = make_span(o->dst, range, true);
+      } else if (k == L_STSPAD) {
         o->cols = blocks * dim_ / sts_chunks(l.J, j0 / 4);   // this chunk's share of the group's data
         o->rs_span = make_span(acc_tile(i, j0), dim_, false);
         // This chunk's destination and RS range, as LoopMatmulStCSpad (:854-918) + ReservationStation.scala:312-325
@@ -234,7 +262,7 @@ bool loop_matmul_t::rows_hit(const span_t &s) const {
     const uint64_t n = (uint64_t)l.K * l.J * dim_;
     const uint64_t a0 = l.a_sp, a1 = a0 + (uint64_t)l.I * l.K * dim_;
     const uint64_t b0 = l.b_end > n ? l.b_end - n : 0, b1 = l.b_end;
-    const uint64_t c0 = l.c_spad, c1 = c0 + 2ull * l.I * l.J * dim_;
+    const uint64_t c0 = l.c_spad, c1 = c0 + ((2ull * l.I * l.J * dim_) << l.multi << l.multi_act);   // :1424-1426
     auto hit = [&](uint64_t lo, uint64_t hi) { return s.lo < hi && lo < s.hi; };
     if (hit(a0, a1) || hit(b0, b1) || (l.spad_only && hit(c0, c1))) return true;
   }

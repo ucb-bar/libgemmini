@@ -78,6 +78,10 @@ void gemmini_state_t::reset()
   mx_scales_used = false;
   loop_ws_A_sc = loop_ws_B_sc = loop_ws_A_sc_stride = loop_ws_B_sc_stride = 0;
   mx_loop_slot = 0;
+  for (int i = 0; i < 2; i++) {
+    mx_slot_a_start[i] = (uint32_t)(i * (BANK_NUM * BANK_ROWS) / 2);
+    mx_slot_b_end[i] = (uint32_t)((i + 1) * (BANK_NUM * BANK_ROWS) / 2);
+  }
   mx_asc_valid[0] = mx_asc_valid[1] = false;
   mx_dram_C = mx_dram_C_stride = 0;
   mx_dram_out = false;
@@ -1088,6 +1092,8 @@ void gemmini_t::loop_ws_config_strides_DC(reg_t rs1, reg_t rs2) {
 void gemmini_t::loop_ws_config_spad_AB(reg_t rs1, reg_t rs2) {
   gemmini_state.mx_loop_a_spad = (uint32_t)rs1;
   gemmini_state.mx_loop_b_spad = (uint32_t)rs2;
+  gemmini_state.mx_slot_a_start[gemmini_state.mx_loop_slot] = (uint32_t)rs1;   // the slot the next LOOP_WS takes
+  gemmini_state.mx_slot_b_end[gemmini_state.mx_loop_slot] = (uint32_t)rs2;
 }
 
 void gemmini_t::loop_ws_config_spad_C(reg_t rs1, reg_t rs2) {
@@ -1331,8 +1337,9 @@ void gemmini_t::mx_loop_ws_dram(reg_t rs1, reg_t rs2) {
     exit(1);
   }
   const uint32_t half = (BANK_NUM * BANK_ROWS) / 2;
-  const uint32_t A_sp = a_spad_id ? (a_spad_id - 1) * half : slot * half;
-  const uint32_t B_end = b_spad_id ? b_spad_id * half : (slot + 1) * half;
+  // spad id 0: the slot's a_addr_start / b_addr_end (LOOP_WS_CONFIG_SPAD_AB, else the slot's half), as the RTL
+  const uint32_t A_sp = a_spad_id ? (a_spad_id - 1) * half : gemmini_state.mx_slot_a_start[slot];
+  const uint32_t B_end = b_spad_id ? b_spad_id * half : gemmini_state.mx_slot_b_end[slot];
   const uint32_t B_sp = B_end - (uint32_t)K * J * DIM;
 
   if (gemmini_state.loop_ws_A_sc != 0) {

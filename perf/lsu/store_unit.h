@@ -33,6 +33,7 @@ public:
     uint64_t dram = 0, stride = 0;   // TO_DRAM; stride 0 = CONFIG_ST's
     local_addr_t dst{0xFFFFFFFFu};   // TO_SPAD
     double out_bytes = 2.0;          // per output element after the requantizer
+    uint32_t out_mult = 1;           // output elements per acc element (multi-elem quad tile: 2 per quad operand)
   };
   span_t src_span(const st_cmd_t &c) const;
 
@@ -44,10 +45,15 @@ public:
   // requant_pending, Scratchpad.scala:954-977. DRAM stores never count.
   uint32_t pending_banks() const;
   cycle_t last_write() const { return last_write_; }   // requant output written into the scratchpad
+  // An accumulator-source store is reading (its beats are in the requantizer): an FP4 SPAD_REQUANT may not start.
+  bool acc_reading() const { return reading_ && acc_src_; }
+  // While hold() is true no accumulator-source store starts (FP4 SPAD_REQUANT waiting or running, Controller
+  // sr_fp4_hold, commit d3e6df6); call process() again when it may have cleared.
+  void on_acc_hold(std::function<bool()> hold) { hold_ = std::move(hold); }
+  void process();
 
 private:
   struct item_t { uint64_t id; st_cmd_t c; uint64_t stride; };
-  void process();
 
   event_queue_t &eq_;
   scratchpad_t &sp_;
@@ -56,11 +62,12 @@ private:
   reservation_station_t &rs_;
   size_t queue_len_;
   uint32_t dim_;
-  cycle_t lag_, rq_lat_, pipe_lat_, slack_, spad_rd_interval_;
+  cycle_t lag_, rq_lat_, pipe_lat_, slack_, spad_rd_interval_, pend_delay_, spad_lead_, pend_tail_;
   double elems_per_read_;
   uint64_t stride_ = 0;
   std::deque<item_t> q_;
-  bool reading_ = false;
+  bool reading_ = false, acc_src_ = false;
+  std::function<bool()> hold_;
   uint64_t reads_ = 0;
   cycle_t last_write_ = 0;
   uint32_t pend_[32] = {};   // per scratchpad bank

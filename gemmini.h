@@ -142,6 +142,9 @@ struct gemmini_state_t
   bool     mx_scales_used;   // an MX scale load happened -> DRAM LOOP_WS runs the MX model
   uint64_t loop_ws_A_sc, loop_ws_B_sc, loop_ws_A_sc_stride, loop_ws_B_sc_stride;
   uint8_t  mx_loop_slot;
+  // LoopMatmul's per-slot a_addr_start / b_addr_end: written by LOOP_WS_CONFIG_SPAD_AB (sticky, not cleared when a
+  // loop retires), reset to the slot's half; a DRAM loop with a / b spad id 0 reads its A / B there
+  uint32_t mx_slot_a_start[2], mx_slot_b_end[2];
   bool     mx_asc_valid[2];
   uint64_t mx_asc_addr[2], mx_asc_stride[2];
   uint16_t mx_asc_I[2], mx_asc_K[2];

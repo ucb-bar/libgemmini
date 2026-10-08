@@ -27,7 +27,8 @@ uint64_t reservation_station_t::alloc(rs_cmd_t c) {
           if (overlaps(*m, *t) && (m->write || t->write)) dep = true;
       if (e.c.q == Q_VEC && q == Q_VEC)   // across vector units: shared read banks, SPAD_REQUANT in order
         dep = dep || (e.c.read_banks & o.c.read_banks) || (e.c.vec == 2 && o.c.vec == 2);
-      if (e.c.q == Q_VEC && e.c.vec == 2 && q == Q_ST && o.c.quantized_store) dep = true;
+      if (e.c.q == Q_VEC && e.c.vec == 2 && q == Q_ST && o.c.sr_ordered_store) dep = true;
+      if ((e.c.sr_ordered_store || e.c.scale_cfg_act0) && q == Q_VEC && o.c.vec == 2) dep = true;
       if (dep) { e.deps++; o.dependents.push_back(id); }
     }
   }
@@ -44,6 +45,15 @@ void reservation_station_t::kick(queue_t q) {
   pending_[q] = true;
   const cycle_t t = cmax(eq_.now(), last_issue_[q] + 1);   // one issue per queue per cycle
   eq_.at(t, [this, q] { pending_[q] = false; try_issue(q); });
+}
+
+bool reservation_station_t::fp4_sr_waiting() const {
+  const uint32_t pending = vec_pending_ ? vec_pending_() : 0;
+  for (uint64_t id : order_[Q_VEC]) {
+    const ent_t &e = ents_.at(id);
+    if (e.c.fp4_sr && !e.issued && e.deps == 0 && !(e.c.sp_banks & pending)) return true;
+  }
+  return false;
 }
 
 void reservation_station_t::try_issue(queue_t q) {

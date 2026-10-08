@@ -83,7 +83,12 @@ private:
   cycle_t miss_detect_ = 0, fill_to_data_ = 0;
   cycle_t hit_lat_, client_hit_lat_, dram_lat_, ack_lat_, full_ack_lat_, put_beats_, dram_cycles_per_line_,
       put_serial_, fill_secondary_first_, fill_secondary_next_;
-  std::list<uint64_t> lru_;   // front = most recent
+  std::list<uint64_t> lru_;   // front = most recent (fully associative mode, mem.l2_ways = 0)
+  // set-associative mode: the lines of each set; a full set evicts a pseudo-random way (as the RTL's LFSR)
+  uint32_t l2_ways_ = 0, l2_sets_n_ = 1;
+  std::vector<std::vector<uint64_t>> l2_set_;
+  uint64_t l2_lfsr_ = 0xACE1ACE1ull;
+  void evict(uint64_t victim);
   std::unordered_map<uint64_t, line_t> lines_;
   cycle_t last_ack_ = 0;
   uint64_t pending_hits_ = 0, hits_ = 0, misses_ = 0, probes_ = 0, host_stores_ = 0, writebacks_ = 0, write_fills_ = 0;

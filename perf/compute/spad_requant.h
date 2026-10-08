@@ -2,6 +2,7 @@
 #define GPERF_SPAD_REQUANT_H
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 
 #include "../params/config.h"
@@ -22,22 +23,27 @@ public:
       : eq_(eq), sp_(sp), rs_(rs), dim_((uint32_t)c.mesh_dim), per_block_((cycle_t)c.sreq_cycles_per_block),
         fixed_((cycle_t)c.sreq_fixed_cycles) {}
 
-  struct cmd_t { uint32_t src, dst, M, N; bool tiled, resident; };
+  struct cmd_t { uint32_t src, dst, M, N; bool tiled, resident, fp4; };
   static cmd_t decode(uint64_t rs1, uint64_t rs2) {
     return {(uint32_t)(rs1 & 0x3FFF), (uint32_t)((rs1 >> 14) & 0x3FFF), (uint32_t)(rs2 & 0xFFFF),
-            (uint32_t)((rs2 >> 16) & 0xFFFF), (bool)((rs1 >> 28) & 1), (bool)((rs1 >> 29) & 1)};
+            (uint32_t)((rs2 >> 16) & 0xFFFF), (bool)((rs1 >> 28) & 1), (bool)((rs1 >> 29) & 1),
+            (bool)((rs2 >> 32) & 1)};
   }
   // exact footprints as the RS computes them (LoopMatmul.scala vec_bypass): BF16 source M*N/8 rows, E4M3
-  // destination M*N/16 rows (M padded to 16 when tiled)
+  // destination M*N/16 rows (M padded to 16 when tiled); FP4: two codes a byte, M*N/32 rows (M padded to 32)
   span_t read_span(const cmd_t &c) const { return make_span(local_addr_t{c.src}, (uint64_t)c.M * c.N * 2 / dim_, false); }
   span_t write_span(const cmd_t &c) const {
-    const uint64_t m = c.tiled ? ((c.M + 15) & ~15u) : c.M;
-    return make_span(local_addr_t{c.dst}, m * c.N / dim_, true);
+    const uint32_t pad = c.fp4 ? 31 : 15;
+    const uint64_t m = c.tiled ? ((c.M + pad) & ~pad) : c.M;
+    return make_span(local_addr_t{c.dst}, m * c.N / (c.fp4 ? 2 * dim_ : dim_), true);
   }
 
   bool has_room() const { return !busy_; }
+  bool fp4_active() const { return busy_ && fp4_; }
+  void on_done(std::function<void()> cb) { done_cb_ = std::move(cb); }
   void accept(uint64_t rs_id, cmd_t c) {
     busy_ = true;
+    fp4_ = c.fp4;
     const uint64_t blocks = (uint64_t)c.M * c.N / 32;
     const cycle_t now = eq_.now();
     // reads pace the blocks (4 rows each, per_block_ cycles); the 2 written rows per block trail them
@@ -48,6 +54,7 @@ public:
         busy_ = false;
         rs_.complete(rs_id);
         rs_.kick(Q_VEC);
+        if (done_cb_) done_cb_();
       });
     };
     sp_.read_port(c.src).request(SP_SREQ, now + 1, (cycle_t)blocks * per_block_, part);
@@ -60,7 +67,8 @@ private:
   reservation_station_t &rs_;
   uint32_t dim_;
   cycle_t per_block_, fixed_;
-  bool busy_ = false;
+  bool busy_ = false, fp4_ = false;
+  std::function<void()> done_cb_;
 };
 
 }  // namespace gperf

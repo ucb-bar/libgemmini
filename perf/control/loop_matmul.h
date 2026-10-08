@@ -40,6 +40,7 @@ struct loop_cmd_t {
   local_addr_t local{0xFFFFFFFFu}, dst{0xFFFFFFFFu};
   uint32_t rows = 0, cols = 0;
   double out_bytes = 2.0;
+  uint32_t out_mult = 1;                      // output elements per acc-tile element (multi-elem: 2 per quad operand)
   span_t out_span;                            // L_STSPAD: the scratchpad rows of the loop's output
   span_t rs_span;                             // L_STC: the RS's range for this mvout (LoopMatmul.scala:602-611)
   // L_LDS: a gated scale load; L_SCFG: the loop's managed scale config
@@ -56,7 +57,10 @@ public:
   bool config_slot_free() const { return (int)active_.size() < max_loops_; }
   void config(unsigned funct, uint64_t rs1, uint64_t rs2);
   // LOOP_WS (funct 8). reads_act0: (not loop-managed) the last scale config may read act half 0.
-  void run(uint64_t rs1, uint64_t rs2, cycle_t now, double out_bytes, bool reads_act0 = true);
+  // multi / multi_act: mx_multi_elem / mx_multi_elem_act (ExecuteController.scala:177-187): the weight / activation
+  // is quad (2 output cols / rows per lane), set by the last CONFIG_EX.
+  void run(uint64_t rs1, uint64_t rs2, cycle_t now, double out_bytes, bool reads_act0 = true, bool multi = false,
+           bool multi_act = false);
   // A non-loop command passed LoopMatmul: the A-scale reuse record is no longer trusted (:1554).
   void invalidate_scale_reuse() { asc_valid_[0] = asc_valid_[1] = false; }
 
@@ -84,6 +88,8 @@ private:
     uint64_t A_sc = 0, B_sc = 0, A_sc_stride = 0, B_sc_stride = 0;
     uint32_t a_sp = 0, b_end = 0, c_spad = 0, acc_base = 0, slot = 0;
     bool spad_only = false, a_reuse = false, inc_acc = false, reads_act0 = true, tiled = false;
+    bool multi = false, multi_act = false;   // narrow_type / narrow_act (LoopMatmul.scala:1344-1345)
+    bool ex_acc = false;                     // LOOP_WS rs1[0] ex_accumulate (:1340)
     double out_bytes = 2.0;
     cycle_t start = 0;
     uint64_t serial = 0;          // which LOOP_WS this is (0, 1, ...)
