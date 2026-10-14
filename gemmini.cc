@@ -1,6 +1,7 @@
 #include "gemmini.h"
+#include "rocket_host.h"
 #include "mx_fp_math.h"
-#include "../gemmini-rocc-tests/include/vpu_ref.h"   // bit-exact VPU reference (shared with the tests)
+#include "vpu_ref.h"   // bit-exact VPU reference (shared with the tests)
 #include <riscv/mmu.h>
 #include <riscv/trap.h>
 #include <stdexcept>
@@ -23,7 +24,7 @@ REGISTER_EXTENSION(gemmini_dim8, []() { return new gemmini_t; })
 REGISTER_EXTENSION(gemmini, []() { return new gemmini_t; })
 #endif
 
-#define dprintf(...) { if (p->get_log_commits_enabled()) printf(__VA_ARGS__); }
+#define dprintf(...) { if (host_->log_commits()) printf(__VA_ARGS__); }
 
 void gemmini_state_t::reset()
 {
@@ -98,6 +99,11 @@ void gemmini_state_t::reset()
   printf("    dim = %u\n", DIM);
 }
 
+void gemmini_t::set_processor(processor_t* p) {
+  if (p != this->p || !host_) host_.reset(new rocket_host_t(p));
+  this->p = p;
+}
+
 void gemmini_t::reset() {
   gemmini_state.reset();
   perf.reset();
@@ -107,7 +113,7 @@ template <class T>
 T gemmini_t::read_from_dram(reg_t addr) {
   T value = 0;
   for (size_t byte_idx = 0; byte_idx < sizeof(T); ++byte_idx) {
-    value |= p->get_mmu()->load<uint8_t>(addr + byte_idx) << (byte_idx*8);
+    value |= host_->load(addr + byte_idx, 1) << (byte_idx*8);
   }
   return value;
 }
@@ -157,7 +163,7 @@ gemmini_t::read_matrix_from_dram(reg_t addr, reg_t rows, reg_t cols,
 template <class T>
 void gemmini_t::write_to_dram(reg_t addr, T data) {
   for (size_t byte_idx = 0; byte_idx < sizeof(T); ++byte_idx) {
-    p->get_mmu()->store<uint8_t>(addr + byte_idx, (data >> (byte_idx*8)) & 0xFF);
+    host_->store(addr + byte_idx, (data >> (byte_idx*8)) & 0xFF, 1);
   }
 }
 
@@ -1198,7 +1204,7 @@ void gemmini_t::spad_requant(reg_t rs1, reg_t rs2) {
         scale_code = (uint8_t)(s < 0 ? 0 : s > 254 ? 254 : s);
         scale = ldexpf(1.0f, (int)scale_code - 127);
       }
-      p->get_mmu()->store<uint8_t>(scale_dram + blk, scale_code);
+      host_->store8(scale_dram + blk, scale_code);
       if (resident) {
         const size_t a_off = (size_t)b * (size_t)M + (size_t)m;
         if (a_off >= gemmini_state.mx_scale_a_mem.size()) gemmini_state.mx_scale_a_mem.resize(a_off + 1, 0x7f);
@@ -1257,8 +1263,8 @@ void gemmini_t::mx_read_smem(reg_t rs1, reg_t rs2) {
   for (uint32_t i = 0; i < num_words; i++) {
     if (smem_off_words + i >= gemmini_state.mx_smem.size()) break;
     uint16_t v = gemmini_state.mx_smem[smem_off_words + i];
-    p->get_mmu()->store<uint8_t>(dram_addr + i*2,     v & 0xFF);
-    p->get_mmu()->store<uint8_t>(dram_addr + i*2 + 1, (v >> 8) & 0xFF);
+    host_->store8(dram_addr + i*2,     v & 0xFF);
+    host_->store8(dram_addr + i*2 + 1, (v >> 8) & 0xFF);
   }
 }
 
@@ -1473,7 +1479,7 @@ void gemmini_t::mx_loop_ws_spad(reg_t rs1, reg_t rs2) {
       if (gemmini_state.mx_dram_C == 0) return;
       for (int m = 0; m < M_out; m++)
         for (int n = 0; n < N_out; n++)
-          p->get_mmu()->store<uint16_t>(gemmini_state.mx_dram_C + ((reg_t)m * gemmini_state.mx_dram_C_stride + n) * 2,
+          host_->store16(gemmini_state.mx_dram_C + ((reg_t)m * gemmini_state.mx_dram_C_stride + n) * 2,
                                         relu_bf16(gemmini_state.mx_smem[smem_base + (size_t)m * N_out + n]));
       return;
     }
@@ -1651,7 +1657,7 @@ void gemmini_t::mx_loop_ws_spad(reg_t rs1, reg_t rs2) {
             scale = ldexpf(1.0f, (int)scale_code - 127);
           }
           if (scale_dram != 0) {
-            p->get_mmu()->store<uint8_t>(scale_dram + (reg_t)m * N_blocks + bi, scale_code);
+            host_->store8(scale_dram + (reg_t)m * N_blocks + bi, scale_code);
           }
           // C8.1 scale residency: also write the act-scale window in TRANSPOSED [GN][M] layout
           // (a_off = block*M + row), so the next matmul reads these as its A-scales in place -- no
@@ -1802,7 +1808,7 @@ void gemmini_t::mx_loop_ws_spad(reg_t rs1, reg_t rs2) {
             scale_code = (uint8_t)s;
           }
           if (scale_dram != 0) {
-            p->get_mmu()->store<uint8_t>(scale_dram + (reg_t)m * N_blocks + bi, scale_code);
+            host_->store8(scale_dram + (reg_t)m * N_blocks + bi, scale_code);
           }
           // C8.1 scale residency: also write the act-scale window in TRANSPOSED [GN][M] layout
           // (a_off = block*M + row), so the next matmul reads these as its A-scales in place -- no
@@ -1937,7 +1943,7 @@ void gemmini_t::mx_loop_ws_spad(reg_t rs1, reg_t rs2) {
             scale_code = (uint8_t)s;
           }
           if (scale_dram != 0) {
-            p->get_mmu()->store<uint8_t>(scale_dram + (reg_t)m * N_blocks + bi, scale_code);
+            host_->store8(scale_dram + (reg_t)m * N_blocks + bi, scale_code);
           }
           // C8.1 scale residency: also write the act-scale window in TRANSPOSED [GN][M] layout
           // (a_off = block*M + row), so the next matmul reads these as its A-scales in place -- no

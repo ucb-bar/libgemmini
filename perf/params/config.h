@@ -20,6 +20,7 @@
 // X(section, name, default, meaning / source)
 #define GPERF_PARAMS(X) \
   /* --- host (Rocket). Placeholder until the host model (perf_model_plan.md section 9) --- */ \
+  X(host, kind,                     0,    "[knob] where Gemmini lives (gemmini_host.h): 0 rocket (RoCC under a Rocket core, spike); 1 radiance (MMIO device in a Radiance cluster, cyclotron)") \
   X(host, cpi,                      1.0,  "host cycles per retired instruction") \
   X(host, fence_cycles,             2,    "cycles for a fence to retire once Gemmini is idle") \
   X(host, l1d_sets,                 64,   "[knob] CPU L1 D$ sets (mem.host_tracking 2; spike --dc S:W:B terms). WithNHugeCores: 64 x 8 x 64 B") \

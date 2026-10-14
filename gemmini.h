@@ -3,10 +3,12 @@
 
 #include <riscv/extension.h>
 #include <riscv/rocc.h>
+#include <memory>
 #include <random>
 #include <limits>
 #include "gemmini_params.h"
 #include "gemmini_perf.h"
+#include "gemmini_host.h"
 
 typedef acc_t output_t; // Systolic array output datatype (coming down from PEs, moving into accumulator)
 static const uint32_t sp_matrices = (BANK_NUM * BANK_ROWS) / DIM; // Size the scratchpad to fit sp_matrices matrices
@@ -172,7 +174,7 @@ public:
   void reset();
   // spike resets each extension with its processor before the program runs: the perf model hooks the CPU's stores
   void reset(processor_t &proc) override { set_processor(&proc); reset(); perf.attach(&proc); }
-  void set_processor(processor_t* p) { this->p = p; }
+  void set_processor(processor_t* p);   // spike: the host is this Rocket core (rocket_host_t)
 
   void mvin(reg_t dram_addr, reg_t sp_addr, int state_id);
   void mvout(reg_t dram_addr, reg_t sp_addr);
@@ -220,6 +222,7 @@ private:
   reg_t cause;
   reg_t aux;
   processor_t* p;
+  std::unique_ptr<gemmini_host_t> host_;   // the SoC around Gemmini: its memory (gemmini_host.h)
 
   const unsigned config_funct = 0;
   const unsigned mvin_funct = 2;
