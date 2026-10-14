@@ -106,6 +106,7 @@ private:
   // Build the next command of unroller k for loop li; false if its gates are closed now.
   bool make(const loop_t &l, int li, loop_kind_t k, cycle_t now, loop_cmd_t *o) const;
   bool ld_blocked(const loop_t &l, loop_kind_t k) const;
+  void pop_done();   // finished loops leave from the head, in order
   uint64_t unroller_loop(loop_kind_t k) const;
   // StC chunking (LoopMatmul.scala:573-577, 714-720): one chunk = one acc chunk = mbl/2 j tiles (32 BF16 columns,
   // whole 64 B lines); a j group of gb tiles stores gb * numChunks / 4 chunks (at least 1), so a 2-tile group is ONE

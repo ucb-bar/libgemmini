@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
+#include <stdexcept>
 
 #include "gemmini.h"
 #include "gemmini_functs.h"
@@ -50,6 +51,8 @@ struct gemmini_radiance {
   uint64_t rs1 = 0, rs2 = 0;
   uint64_t commands = 0, rejected = 0;
   bool warned[0x1000 / 8] = {};
+  bool trace = getenv("GEMMINI_RADIANCE_TRACE") != nullptr;   // every register access to stderr
+  uint64_t last_read_off = ~0ull, last_read_val = ~0ull, repeats = 0;
 
   void warn(uint32_t offset, const char *what) {
     bool &w = warned[(offset & 0xFFF) / 8];
@@ -84,15 +87,24 @@ int gemmini_radiance_write(gemmini_radiance_t *g, uint64_t cycle, uint32_t offse
   if (offset != R_INST) { g->warn(offset, "write"); return 1; }
   const unsigned funct = (unsigned)(value >> 25) & 0x7F;
   if (!g->model->offer(t, funct, g->rs1, g->rs2)) { g->rejected++; return 0; }
+  if (g->trace)
+    fprintf(stderr, "gemmini mmio %lld: INST funct %u rs1 0x%llx rs2 0x%llx\n", (long long)t, funct,
+            (unsigned long long)g->rs1, (unsigned long long)g->rs2);
   g->commands++;
-  // the functional effect when the command is taken (as spike's `both`: at issue)
-  if (g->mode == GEMMINI_RADIANCE_BOTH || !moves_or_computes_data(funct)) g->func->execute(funct, g->rs1, g->rs2);
+  // the functional effect when the command is taken (as spike's `both`: at issue). Exceptions do not cross the C
+  // API (the host may not be C++): report the command and stop.
+  try {
+    if (g->mode == GEMMINI_RADIANCE_BOTH || !moves_or_computes_data(funct)) g->func->execute(funct, g->rs1, g->rs2);
+  } catch (const std::exception &e) {
+    fprintf(stderr, "gemmini radiance: command %llu (funct %u, rs1 0x%llx, rs2 0x%llx) at cycle %lld failed: %s\n",
+            (unsigned long long)g->commands, funct, (unsigned long long)g->rs1, (unsigned long long)g->rs2,
+            (long long)t, e.what());
+    abort();
+  }
   return 1;
 }
 
-uint64_t gemmini_radiance_read(gemmini_radiance_t *g, uint64_t cycle, uint32_t offset, unsigned bytes) {
-  (void)bytes;
-  const gperf::cycle_t t = (gperf::cycle_t)cycle;
+static uint64_t read_reg(gemmini_radiance_t *g, gperf::cycle_t t, uint32_t offset) {
   switch (offset & 0xFFF) {
     case R_READY: return g->model->cmd_ready(t) ? 1 : 0;
     case R_BUSY: return g->model->busy(t) ? 1 : 0;
@@ -100,6 +112,24 @@ uint64_t gemmini_radiance_read(gemmini_radiance_t *g, uint64_t cycle, uint32_t o
     case R_RETIRED: return g->model->loops_retired(t) & 0xFFFFFFFFu;
     default: g->warn(offset, "read"); return 0;
   }
+}
+
+uint64_t gemmini_radiance_read(gemmini_radiance_t *g, uint64_t cycle, uint32_t offset, unsigned bytes) {
+  (void)bytes;
+  const uint64_t v = read_reg(g, (gperf::cycle_t)cycle, offset);
+  if (g->trace) {   // a poll loop: print the first read of each value, then a count
+    if (offset == g->last_read_off && v == g->last_read_val) {
+      g->repeats++;
+    } else {
+      if (g->repeats) fprintf(stderr, "gemmini mmio   (x%llu more)\n", (unsigned long long)g->repeats);
+      fprintf(stderr, "gemmini mmio %llu: read +0x%x = %llu\n", (unsigned long long)cycle, offset & 0xFFF,
+              (unsigned long long)v);
+      g->last_read_off = offset;
+      g->last_read_val = v;
+      g->repeats = 0;
+    }
+  }
+  return v;
 }
 
 void gemmini_radiance_advance(gemmini_radiance_t *g, uint64_t cycle) { g->model->advance_to((gperf::cycle_t)cycle); }
@@ -115,8 +145,10 @@ uint64_t gemmini_radiance_finish(gemmini_radiance_t *g, const char *report_path)
   g->model->finish();
   FILE *f = report_path ? fopen(report_path, "w") : nullptr;
   if (!f) f = stderr;
-  fprintf(f, "gemmini radiance: %llu commands (%llu INST stores retried)\n", (unsigned long long)g->commands,
-          (unsigned long long)g->rejected);
+  const gperf::cycle_t end = g->model->busy_until() + 1;
+  fprintf(f, "gemmini radiance: %llu commands (%llu INST stores retried); LOOP_WS pending %llu, retired %llu\n",
+          (unsigned long long)g->commands, (unsigned long long)g->rejected,
+          (unsigned long long)g->model->loops_pending(end), (unsigned long long)g->model->loops_retired(end));
   g->model->report(f);
   if (f != stderr) fclose(f);
   return (uint64_t)g->model->busy_until();

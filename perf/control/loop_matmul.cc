@@ -74,7 +74,17 @@ void loop_matmul_t::run(uint64_t rs1, uint64_t rs2, cycle_t now, double out_byte
   // multi-elem: one store per (i, j) tile, no chunks (LoopMatmulStCSpad iter_max_j = max_j, :822, :961)
   l.total[L_STSPAD] = (l.spad_only && !skip_st) ? l.I * (l.multi ? l.J : sts_per_i(l.J)) : 0;
   loops_run_++;
-  if (!l.done()) active_.push_back(l);
+  // an empty loop (every stage skipped or without an address) still takes its slot and is unrolled in order: the
+  // occupancy / retire counters count it (GemminiTile.scala:345-358)
+  active_.push_back(l);
+  pop_done();
+}
+
+void loop_matmul_t::pop_done() {
+  while (!active_.empty() && active_.front().done()) {   // the head slot frees
+    active_.pop_front();
+    loops_unrolled_++;
+  }
 }
 
 bool loop_matmul_t::make(const loop_t &l, int li, loop_kind_t k, cycle_t now, loop_cmd_t *o) const {
@@ -357,10 +367,7 @@ void loop_matmul_t::emitted(const loop_cmd_t &c) {
       break;
     default: break;
   }
-  while (!active_.empty() && active_.front().done()) {   // the head slot frees
-    active_.pop_front();
-    loops_unrolled_++;
-  }
+  pop_done();
 }
 
 void loop_matmul_t::completed(int tag) {
