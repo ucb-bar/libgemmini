@@ -11,14 +11,22 @@
 #define DIM GEMMINI_DIM
 #define ADDR_LEN 32
 #define BANK_NUM 4
-#if GEMMINI_DIM == 8
+#if defined(GEMMINI_RADIANCE)
+// Radiance (WithRadianceMxGemmini): the scratchpad is the cluster's shared memory, 128 KiB = 4 banks x 2048 rows of
+// 16 B; a 32 KiB accumulator = 256 rows (radiance-kernels lib/include/nightly/mx.h)
+#define BANK_ROWS 2048
+#elif GEMMINI_DIM == 8
 // DIM=8 test-side BANK_ROWS = 65536/DIM = 8192, so b_base = BANK_NUM*BANK_ROWS = 32768 -- the model
 // scratchpad (sized BANK_NUM*BANK_ROWS/DIM matrices) must be at least that big.
 #define BANK_ROWS 8192
 #else
 #define BANK_ROWS 4096
 #endif
+#if defined(GEMMINI_RADIANCE)
+#define ACC_ROWS 256
+#else
 #define ACC_ROWS 1024
+#endif
 #define MAX_BYTES 64
 #define MAX_BLOCK_LEN (MAX_BYTES/(DIM*1))
 #define MAX_BLOCK_LEN_ACC (MAX_BYTES/(DIM*4))

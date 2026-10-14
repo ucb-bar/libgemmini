@@ -4,6 +4,34 @@
 #include <cstddef>
 #include <cstdint>
 
+#ifdef GEMMINI_NO_SPIKE
+#include <cstdio>
+#include <cstdlib>
+
+namespace gperf {
+
+// Built without spike (radiance host): there is no CPU L1 to model here (mem.host_tracking 2 needs spike).
+class host_cache_t {
+public:
+  enum result_t { HIT = 0, MISS = 1, MISS_WRITEBACK = 2 };
+  host_cache_t(size_t, size_t, size_t line, const char *) : line_(line) {
+    fprintf(stderr, "gemmini perf: mem.host_tracking 2 (the CPU's L1 caches) needs the spike build\n");
+    abort();
+  }
+  result_t touch(uint64_t, bool) { return HIT; }
+  bool holds(uint64_t, bool *dirty) { if (dirty) *dirty = false; return false; }
+  void drop(uint64_t) {}
+  void clean(uint64_t) {}
+  size_t line_bytes() const { return line_; }
+  uint64_t misses() const { return 0; }
+  uint64_t writebacks() const { return 0; }
+
+private:
+  size_t line_;
+};
+
+}  // namespace gperf
+#else
 #include <riscv/cachesim.h>   // spike's cache model, used as installed (libriscv.so exports it)
 
 namespace gperf {
@@ -51,5 +79,6 @@ private:
 };
 
 }  // namespace gperf
+#endif  // GEMMINI_NO_SPIKE
 
 #endif

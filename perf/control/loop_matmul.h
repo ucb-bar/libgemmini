@@ -33,6 +33,7 @@ enum loop_class_t { LC_LD = 0, LC_EX = 1, LC_ST = 2 };   // RS tag of a loop-iss
 struct loop_cmd_t {
   loop_kind_t kind;
   int loop;                                   // index into the active loops
+  uint64_t serial = 0;                        // which LOOP_WS (0, 1, ...)
   // L_EX: one preload (b weights, c accumulator) + one compute (a)
   local_addr_t a{0xFFFFFFFFu}, b{0xFFFFFFFFu}, c{0xFFFFFFFFu};
   // L_LDA / L_LDB: an mvin of rows x cols at dram into local; L_STC / L_STSPAD: a store of the acc tile at local
@@ -80,6 +81,7 @@ public:
   bool ex_has_room() const { return out_[LC_EX] < lim_ex_; }
   void note_passed_ex() { out_[LC_EX]++; }           // a passed CONFIG_SCALE_MEM counts as a loop ex command
   uint64_t loops_run() const { return loops_run_; }
+  uint64_t loops_unrolled() const { return loops_unrolled_; }   // every command emitted (the slot freed)
 
 private:
   struct loop_t {
@@ -132,7 +134,7 @@ private:
   uint32_t acc_cursor_ = 0;       // next alternating loop's accumulator C base
   bool asc_valid_[2] = {false, false};
   a_scale_slice_t asc_[2] = {};
-  uint64_t loops_run_ = 0;
+  uint64_t loops_run_ = 0, loops_unrolled_ = 0;
   // The loop each load unroller served last. An unroller moves to the next loop as soon as it has emitted all of its
   // own (unroller_loop); the A/B arbiter forces the one on the head loop only when the two are on different loops
   // (LoopMatmul.scala:1173-1176) -- so a newer loop's loads of one kind wait while the other unroller is still busy

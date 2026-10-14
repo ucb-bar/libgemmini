@@ -87,6 +87,7 @@ bool loop_matmul_t::make(const loop_t &l, int li, loop_kind_t k, cycle_t now, lo
   *o = loop_cmd_t{};
   o->kind = k;
   o->loop = li;
+  o->serial = l.serial;
   o->out_bytes = l.out_bytes;
   switch (k) {
     case L_LDS: {   // A (unless reused) then B: 2-D, rows = k blocks, row = I or J tiles of DIM bytes, dest = slot
@@ -355,7 +356,10 @@ void loop_matmul_t::emitted(const loop_cmd_t &c) {
       break;
     default: break;
   }
-  while (!active_.empty() && active_.front().done()) active_.pop_front();   // the head slot frees
+  while (!active_.empty() && active_.front().done()) {   // the head slot frees
+    active_.pop_front();
+    loops_unrolled_++;
+  }
 }
 
 void loop_matmul_t::completed(int tag) {

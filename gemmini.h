@@ -1,14 +1,22 @@
 #ifndef _GEMMINI_H
 #define _GEMMINI_H
 
+#ifndef GEMMINI_NO_SPIKE
 #include <riscv/extension.h>
 #include <riscv/rocc.h>
+#else
+// Built without spike (radiance host, cyclotron): the few spike types the model uses
+#include <cstdint>
+typedef uint64_t reg_t;
+struct rocc_insn_t { unsigned opcode = 0, rd = 0, xs2 = 0, xs1 = 0, xd = 0, rs1 = 0, rs2 = 0, funct = 0; };
+#endif
 #include <memory>
 #include <random>
 #include <limits>
 #include "gemmini_params.h"
 #include "gemmini_perf.h"
 #include "gemmini_host.h"
+#include "gemmini_spad.h"
 
 typedef acc_t output_t; // Systolic array output datatype (coming down from PEs, moving into accumulator)
 static const uint32_t sp_matrices = (BANK_NUM * BANK_ROWS) / DIM; // Size the scratchpad to fit sp_matrices matrices
@@ -106,7 +114,7 @@ struct gemmini_state_t
   bool enable;
   bool resetted = false;
 
-  std::vector<std::vector<elem_t>> spad; // Scratchpad constructed as systolic array rows
+  spad_t spad; // Scratchpad constructed as systolic array rows (gemmini_spad.h: own SRAM or the host's memory)
   std::vector<std::vector<acc_t>> pe_state; // Stores each PE's internal accumulator state
   std::vector<std::vector<acc_t>> accumulator;
 
@@ -164,17 +172,26 @@ struct gemmini_state_t
   std::vector<uint8_t> mx_lut_c;
 };
 
-class gemmini_t : public extension_t
+class gemmini_t
+#ifndef GEMMINI_NO_SPIKE
+  : public extension_t
+#endif
 {
 public:
   gemmini_t() : cause(0), aux(0), debug(false) {}
-  const char* name() const override { return "gemmini"; }
 
   reg_t CUSTOMFN(XCUSTOM_ACC)(rocc_insn_t insn, reg_t xs1, reg_t xs2);
   void reset();
+#ifndef GEMMINI_NO_SPIKE
+  const char* name() const override { return "gemmini"; }
   // spike resets each extension with its processor before the program runs: the perf model hooks the CPU's stores
   void reset(processor_t &proc) override { set_processor(&proc); reset(); perf.attach(&proc); }
   void set_processor(processor_t* p);   // spike: the host is this Rocket core (rocket_host_t)
+#endif
+  // Another host (gemmini_host.h): its memory, and -- radiance -- its shared memory as the scratchpad. Then
+  // execute() runs one command's functional work (the host owns timing).
+  void set_host(std::unique_ptr<gemmini_host_t> host);
+  reg_t execute(unsigned funct, reg_t rs1, reg_t rs2);
 
   void mvin(reg_t dram_addr, reg_t sp_addr, int state_id);
   void mvout(reg_t dram_addr, reg_t sp_addr);
@@ -213,15 +230,21 @@ public:
   void loop_conv_ws_config_5(reg_t rs1, reg_t rs2);
   void loop_conv_ws_config_6(reg_t rs1, reg_t rs2);
 
+#ifndef GEMMINI_NO_SPIKE
   virtual std::vector<insn_desc_t> get_instructions(const processor_t &p) override;
   virtual std::vector<disasm_insn_t*> get_disasms(const processor_t *p) override;
+#endif
 
 private:
   gemmini_state_t gemmini_state;
+#ifndef GEMMINI_NO_SPIKE
   gemmini_perf_t perf;   // timing model (gemmini_perf.h); mode from $GEMMINI_MODE
+#endif
   reg_t cause;
   reg_t aux;
-  processor_t* p;
+#ifndef GEMMINI_NO_SPIKE
+  processor_t* p = nullptr;
+#endif
   std::unique_ptr<gemmini_host_t> host_;   // the SoC around Gemmini: its memory (gemmini_host.h)
 
   const unsigned config_funct = 0;

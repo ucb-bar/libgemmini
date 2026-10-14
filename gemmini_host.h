@@ -8,6 +8,7 @@
 //   radiance  an MMIO device in a Radiance cluster, in cyclotron: commands are stores to the cluster's Gemmini
 //             registers, the DMA reaches global memory, the scratchpad is the cluster's shared memory
 
+#include <cstddef>
 #include <cstdint>
 
 enum class gemmini_host_kind_t { ROCKET = 0, RADIANCE = 1 };
@@ -23,7 +24,12 @@ public:
   void store8(uint64_t addr, uint8_t value) { store(addr, value, 1); }
   void store16(uint64_t addr, uint16_t value) { store(addr, value, 2); }
 
+  // The scratchpad, when it is the host's memory (radiance: the cluster's shared memory; row r at byte r * DIM):
+  // its first byte and *rows; nullptr when Gemmini has its own (rocket).
+  virtual uint8_t *shared_scratchpad(size_t *rows) { (void)rows; return nullptr; }
+
   virtual bool log_commits() const { return false; }   // gemmini.cc's dprintf
+  virtual void command(unsigned funct, uint64_t rs1, uint64_t rs2) { (void)funct; (void)rs1; (void)rs2; }   // a command the functional model runs (gemmini_host_log.h)
 };
 
 #endif

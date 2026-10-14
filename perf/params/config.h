@@ -166,6 +166,8 @@ struct config_t {
 
   // GEMMINI_PERF_CONFIG / GEMMINI_PERF_SET / GEMMINI_PERF_DUMP_CONFIG, as above. Aborts on an unknown name.
   static config_t from_env();
+  // A preset by name (nullptr / "": mx_rocket) + "section.name=value,..." overrides (nullptr: none), as above
+  static config_t make(const char *preset, const char *overrides);
   bool set(const std::string &dotted_name, double value);   // "rs.ex_entries"; false if unknown
   void dump(FILE *f) const;
 };

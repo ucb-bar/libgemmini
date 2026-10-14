@@ -67,11 +67,25 @@ public:
   int host_tracking_level() const { return (int)cfg_.mem_host_tracking; }
   bool host_icache() const { return cfg_.host_icache != 0; }
 
+  // ---- host.kind 1 (radiance, gemmini_radiance.cc): the host's clock; commands are MMIO register writes ----
+  // Every call names the host's current cycle t (non-decreasing); everything before t has happened first, so a
+  // read sees the registers as the cycle begins.
+  void advance_to(cycle_t t) { if (t > eq_.now()) eq_.advance_to(t); }
+  // The INST register write at t: false while the command path is full (RTL io.cmd.ready low -- the store waits and
+  // is offered again later); true: taken at t.
+  bool offer(cycle_t t, unsigned funct, uint64_t rs1, uint64_t rs2);
+  bool cmd_ready(cycle_t t) { advance_to(t); return !front_.full(); }          // READY (+0x08)
+  bool busy(cycle_t t) { advance_to(t); return !idle() || busy_until() >= t; }   // BUSY (+0x20): io.busy
+  uint64_t loops_pending(cycle_t t) { advance_to(t); return loops_accepted_ - loops_.loops_unrolled(); }   // +0x28
+  uint64_t loops_retired(cycle_t t);   // RETIRED (+0x38): LOOP_WS whose every command completed, in issue order
+  cycle_t next_event() const { return eq_.next_time(); }   // the host may skip to here while it has nothing to say
+
   void finish();                 // run until idle (end of program)
   cycle_t busy_until() const;    // when Gemmini's busy signal last dropped
   void check_stuck(const char *where);
   bool stuck_reported_ = false;
   bool passing_ = false;         // the raw command being issued is bypassing configured loops
+  bool idle() const { return front_.empty() && loops_.idle() && rs_.idle() && scales_.idle() && !luts_.busy(); }
   void report(FILE *f) const;
 
 private:
@@ -114,6 +128,10 @@ private:
   uint64_t step_ev_ = 0;
 
   uint64_t cmds_ = 0, fences_ = 0;
+  // LOOP_WS accounting for the radiance registers: accepted, and per loop its RS entries not yet completed
+  int64_t loop_serial_ = -1;     // the loop whose command issue_loop is issuing (stamped on its RS entries)
+  uint64_t loops_accepted_ = 0, loops_retired_ = 0;
+  std::map<uint64_t, uint64_t> loop_out_;
   struct fence_cmp_t { cycle_t rtl, model; };   // replay: RTL fence retire vs model idle, for fences that waited
   std::vector<fence_cmp_t> fence_cmp_;
   uint64_t cmds_at_fence_ = 0;

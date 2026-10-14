@@ -63,16 +63,15 @@ void config_t::dump(FILE *f) const {
 #undef GPERF_DUMP
 }
 
-config_t config_t::from_env() {
+config_t config_t::make(const char *p, const char *s) {
   config_t c;
-  const char *p = getenv("GEMMINI_PERF_CONFIG");
   if (!p || !*p || !strcmp(p, "mx_rocket")) c = preset_mx_rocket();
   else if (!strcmp(p, "e4m3_vpu")) c = preset_e4m3_vpu();
   else if (!strcmp(p, "firesim")) c = preset_firesim();
   else if (!strcmp(p, "e3m2_lut")) c = preset_e3m2_lut();
   else { fprintf(stderr, "gemmini perf: unknown GEMMINI_PERF_CONFIG=%s (mx_rocket|e4m3_vpu|firesim|e3m2_lut)\n", p); abort(); }
 
-  if (const char *s = getenv("GEMMINI_PERF_SET")) {
+  if (s) {
     std::string all(s);
     size_t pos = 0;
     while (pos < all.size()) {
@@ -87,6 +86,11 @@ config_t config_t::from_env() {
       pos = end + 1;
     }
   }
+  return c;
+}
+
+config_t config_t::from_env() {
+  config_t c = make(getenv("GEMMINI_PERF_CONFIG"), getenv("GEMMINI_PERF_SET"));
   if (getenv("GEMMINI_PERF_DUMP_CONFIG")) c.dump(stderr);
   return c;
 }

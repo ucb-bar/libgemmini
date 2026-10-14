@@ -19,6 +19,10 @@ model_t::model_t(const config_t &c)
   // anything that frees a resource the command stream may be waiting on wakes it
   rs_.on_room([this] { kick_at(eq_.now()); });
   rs_.on_done([this](int tag) { loops_.completed(tag); kick_at(eq_.now()); });
+  rs_.on_loop_done([this](int64_t loop) {
+    auto it = loop_out_.find((uint64_t)loop);
+    if (it != loop_out_.end() && --it->second == 0) loop_out_.erase(it);
+  });
   scales_.on_room([this] { kick_at(eq_.now()); });
   if (c.rs_vec_pending_gate) rs_.on_vec_pending([this] { return store_.pending_banks(); });
   rs_.set_scale_cfg_waits_loads(c.rs_scale_cfg_waits_loads != 0);
@@ -65,7 +69,13 @@ void model_t::kick_at(cycle_t t) {
   });
 }
 
-uint64_t model_t::rs_alloc(rs_cmd_t c) { return rs_.alloc(std::move(c)); }
+uint64_t model_t::rs_alloc(rs_cmd_t c) {
+  if (loop_serial_ >= 0) {
+    c.loop = loop_serial_;
+    loop_out_[(uint64_t)loop_serial_]++;
+  }
+  return rs_.alloc(std::move(c));
+}
 
 // The scratchpad banks a range touches (accumulator ranges: none).
 // A preload's C range in the RS: DIM rows from its address, or -- packed MX acc on RTL with the fix -- from the start of
@@ -114,7 +124,10 @@ void model_t::step() {
     loop_cmd_t lc;
     cycle_t wake = NEVER;
     if (loops_.next(now, &lc, &wake)) {
-      if (issue_loop(lc)) { progress = true; }
+      loop_serial_ = (int64_t)lc.serial;
+      const bool issued = issue_loop(lc);
+      loop_serial_ = -1;
+      if (issued) { progress = true; }
     } else if (loops_.idle() && front_.head_ready(now) && !is_loop_cmd(front_.head().funct)) {
       if (issue_raw(front_.head())) {
         loops_.invalidate_scale_reuse();
@@ -513,6 +526,25 @@ cycle_t model_t::busy_until() const {
   t = cmax(t, luts_.last_done());
   t = cmax(t, store_.last_write());
   return t;
+}
+
+bool model_t::offer(cycle_t t, unsigned f, uint64_t rs1, uint64_t rs2) {
+  advance_to(t);
+  if (front_.full()) return false;
+  cmds_++;
+  if (f == 8) loops_accepted_++;   // LOOP_WS: the occupancy counter counts it from here (GemminiTile.scala:345-358)
+  if (trace_) fprintf(trace_, "host_cmd%u,host,%lld,%lld,%lld\n", f, (long long)t, (long long)t, (long long)t);
+  kick_at(front_.push(f, rs1, rs2, t));
+  return true;
+}
+
+uint64_t model_t::loops_retired(cycle_t t) {
+  advance_to(t);
+  while (loops_retired_ < loops_.loops_unrolled()) {
+    if (loop_out_.count(loops_retired_)) break;   // an RS entry of the oldest unretired loop is in flight
+    loops_retired_++;
+  }
+  return loops_retired_;
 }
 
 void model_t::finish() {

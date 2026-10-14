@@ -1,9 +1,12 @@
 #include "gemmini.h"
-#include "rocket_host.h"
 #include "mx_fp_math.h"
 #include "vpu_ref.h"   // bit-exact VPU reference (shared with the tests)
+#include "gemmini_host_log.h"
+#ifndef GEMMINI_NO_SPIKE
+#include "rocket_host.h"
 #include <riscv/mmu.h>
 #include <riscv/trap.h>
+#endif
 #include <stdexcept>
 #include <iostream>
 #include <assert.h>
@@ -16,12 +19,14 @@ using namespace std;
 
 // DIM=16 builds register as "gemmini" (libgemmini.so); DIM=32 builds register as
 // "gemmini_dim32" (libgemmini_dim32.so) so both meshes coexist as spike extensions.
+#ifndef GEMMINI_NO_SPIKE
 #if GEMMINI_DIM == 32
 REGISTER_EXTENSION(gemmini_dim32, []() { return new gemmini_t; })
 #elif GEMMINI_DIM == 8
 REGISTER_EXTENSION(gemmini_dim8, []() { return new gemmini_t; })
 #else
 REGISTER_EXTENSION(gemmini, []() { return new gemmini_t; })
+#endif
 #endif
 
 #define dprintf(...) { if (host_->log_commits()) printf(__VA_ARGS__); }
@@ -99,14 +104,34 @@ void gemmini_state_t::reset()
   printf("    dim = %u\n", DIM);
 }
 
+#ifndef GEMMINI_NO_SPIKE
 void gemmini_t::set_processor(processor_t* p) {
-  if (p != this->p || !host_) host_.reset(new rocket_host_t(p));
+  if (p != this->p || !host_) {
+    host_.reset(new rocket_host_t(p));
+    static FILE *log = getenv("GEMMINI_FUNC_LOG") ? fopen(getenv("GEMMINI_FUNC_LOG"), "w") : nullptr;
+    if (log) host_.reset(new logging_host_t(std::move(host_), log));   // gemmini_host_log.h
+  }
   this->p = p;
+}
+#endif
+
+void gemmini_t::set_host(std::unique_ptr<gemmini_host_t> host) {
+  host_ = std::move(host);
+  size_t rows = 0;
+  if (uint8_t *mem = host_->shared_scratchpad(&rows)) gemmini_state.spad.attach((elem_t *)mem, rows);
+}
+
+reg_t gemmini_t::execute(unsigned funct, reg_t rs1, reg_t rs2) {
+  rocc_insn_t insn;
+  insn.funct = funct;
+  return CUSTOMFN(XCUSTOM_ACC)(insn, rs1, rs2);
 }
 
 void gemmini_t::reset() {
   gemmini_state.reset();
+#ifndef GEMMINI_NO_SPIKE
   perf.reset();
+#endif
 }
 
 template <class T>
@@ -1148,7 +1173,7 @@ void gemmini_t::vpu_exec(reg_t rs1, reg_t rs2) {
                b.empty() ? nullptr : (const uint16_t (*)[VPU_LANES])b.data(), rows, rlen, bcast, imm);
   const int nout = vpu_is_reduction(op) ? rows / rlen : rows;
   for (int i = 0; i < nout; i++) {
-    auto &r = gemmini_state.spad[(dst + i) & 0x3FFF];
+    auto r = gemmini_state.spad[(dst + i) & 0x3FFF];
     for (int l = 0; l < VPU_LANES; l++) { r[2 * l] = (elem_t)(o[i][l] & 0xFF); r[2 * l + 1] = (elem_t)(o[i][l] >> 8); }
   }
   if (op == VPU_EXPSUM) {   // row sums of the written result (as RSUM over it), one row per logical row at imm[13:0]
@@ -1156,7 +1181,7 @@ void gemmini_t::vpu_exec(reg_t rs1, reg_t rs2) {
     vpu_ref_exec(VPU_RSUM, (uint16_t (*)[VPU_LANES])s.data(), (const uint16_t (*)[VPU_LANES])o.data(), nullptr,
                  rows, rlen, 0, 0);
     for (int g = 0; g < rows / rlen; g++) {
-      auto &r = gemmini_state.spad[((imm & 0x3FFF) + g) & 0x3FFF];
+      auto r = gemmini_state.spad[((imm & 0x3FFF) + g) & 0x3FFF];
       for (int l = 0; l < VPU_LANES; l++) { r[2 * l] = (elem_t)(s[g][l] & 0xFF); r[2 * l + 1] = (elem_t)(s[g][l] >> 8); }
     }
   }
@@ -1186,7 +1211,7 @@ void gemmini_t::spad_requant(reg_t rs1, reg_t rs2) {
       const uint32_t blk = (uint32_t)(m * GN + b);
       float v[32];
       for (int k = 0; k < 32; k++) {
-        const auto &row = gemmini_state.spad[(src + 4 * blk + k / 8) & 0x3FFF];
+        const auto row = gemmini_state.spad[(src + 4 * blk + k / 8) & 0x3FFF];
         const int l = k % 8;
         v[k] = mx::bf16_to_f32((uint16_t)((uint8_t)row[2 * l] | ((uint8_t)row[2 * l + 1] << 8)));
       }
@@ -1215,7 +1240,7 @@ void gemmini_t::spad_requant(reg_t rs1, reg_t rs2) {
           const int p = m / 2, n = 32 * b + k;
           const uint32_t r = tiled ? dst + ((uint32_t)((p / 16) * (N / 16) + n / 16) << 4) + (uint32_t)(p % 16)
                                    : dst + (uint32_t)(p * (N / 16) + n / 16);
-          auto &row = gemmini_state.spad[r & 0x3FFF];
+          auto row = gemmini_state.spad[r & 0x3FFF];
           const uint8_t code = mx::bf16_bits_to_fp4_e2m1_code(mx::f32_to_bf16_rne(v[k] / scale));
           uint8_t byte = (uint8_t)row[n % 16];
           byte = (m & 1) ? (uint8_t)((byte & 0x0F) | (code << 4)) : (uint8_t)((byte & 0xF0) | code);
@@ -1226,7 +1251,7 @@ void gemmini_t::spad_requant(reg_t rs1, reg_t rs2) {
       for (int h = 0; h < 2; h++) {
         const uint32_t r = tiled ? dst + ((uint32_t)((m / 16) * (N / 16) + 2 * b + h) << 4) + (uint32_t)(m % 16)
                                  : dst + 2 * blk + (uint32_t)h;
-        auto &row = gemmini_state.spad[r & 0x3FFF];
+        auto row = gemmini_state.spad[r & 0x3FFF];
         // a -0.0 element keeps its sign (0x80), as the RTL requantizer does; fp8_e4m3_to_code canonicalizes it to +0
         // for the Python matmul-requant golden
         for (int c = 0; c < 16; c++) {
@@ -2505,7 +2530,10 @@ reg_t gemmini_t::CUSTOMFN(XCUSTOM_ACC)(rocc_insn_t insn, reg_t xs1, reg_t xs2) {
   if (!gemmini_state.resetted) {
     reset();
   }
+#ifndef GEMMINI_NO_SPIKE
   if (perf.on_cmd(p, insn.funct, xs1, xs2)) return 0;   // perf mode: timed, data work skipped (gemmini_perf.cc)
+#endif
+  host_->command(insn.funct, xs1, xs2);
   if (gemmini_state.op_in_progress)
     counter_increment_random();
 
@@ -2637,7 +2665,12 @@ reg_t gemmini_t::CUSTOMFN(XCUSTOM_ACC)(rocc_insn_t insn, reg_t xs1, reg_t xs2) {
     dprintf("GEMMINI: fence\n");
   } else {
     dprintf("GEMMINI: encountered unknown instruction with funct: %d\n", insn.funct);
+#ifndef GEMMINI_NO_SPIKE
     illegal_instruction(*p);
+#else
+    fprintf(stderr, "gemmini: unknown command funct %u\n", (unsigned)insn.funct);
+    abort();
+#endif
   }
   gemmini_state.op_in_progress = (insn.funct != flush_funct);
   return 0;
@@ -2932,6 +2965,7 @@ void gemmini_t::counter_increment_random() {
   }
 }
 
+#ifndef GEMMINI_NO_SPIKE
 static reg_t gemmini_custom(processor_t* p, insn_t insn, reg_t pc) {
   gemmini_t* gemmini = static_cast<gemmini_t*>(p->get_extension("gemmini"));
   rocc_insn_union_t u;
@@ -2961,3 +2995,4 @@ std::vector<disasm_insn_t*> gemmini_t::get_disasms(const processor_t *p)
   std::vector<disasm_insn_t*> insns;
   return insns;
 }
+#endif

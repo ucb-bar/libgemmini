@@ -30,6 +30,7 @@ struct rs_cmd_t {
   std::function<bool()> unit_has_room;       // the unit's command queue can take it
   std::function<void(uint64_t id)> start;    // hand it to the unit; the unit calls complete(id)
   int tag = -1;                              // >= 0: issued by LoopMatmul (for its throttles)
+  int64_t loop = -1;                         // >= 0: the LOOP_WS (its serial) that issued it
   int vec = 0;                               // vector queue: 1 = VPU_EXEC, 2 = SPAD_REQUANT
   uint32_t read_banks = 0;                   // vector entries: scratchpad banks it reads (one VPU read port each)
   uint32_t sp_banks = 0;                     // vector entries: every scratchpad bank of a, b, c, d (entry_sp_banks)
@@ -56,6 +57,7 @@ public:
   // one may not issue (ReservationStation.scala:574-578). Re-kick Q_VEC when the set shrinks.
   void on_vec_pending(std::function<uint32_t()> cb) { vec_pending_ = std::move(cb); }
   void on_done(std::function<void(int tag)> cb) { done_cb_ = std::move(cb); }
+  void on_loop_done(std::function<void(int64_t loop)> cb) { loop_done_cb_ = std::move(cb); }   // c.loop >= 0
   void on_trace(std::function<void(const rs_cmd_t &, cycle_t alloc, cycle_t issue, cycle_t done)> cb) {
     trace_cb_ = std::move(cb);
   }
@@ -91,6 +93,7 @@ private:
   std::function<uint32_t()> vec_pending_;
   bool scale_cfg_waits_loads_ = false;
   std::function<void(int)> done_cb_;
+  std::function<void(int64_t)> loop_done_cb_;
   std::function<void(const rs_cmd_t &, cycle_t, cycle_t, cycle_t)> trace_cb_;
 };
 

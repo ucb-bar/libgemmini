@@ -33,6 +33,7 @@ public:
 
   cycle_t now() const { return now_; }
   cycle_t last_activity() const { return last_; }   // time of the last event that ran
+  cycle_t next_time() const { return heap_.empty() ? NEVER : heap_.top().t; }   // the next event's cycle (NEVER: none)
   uint64_t events() const { return n_; }
 
   // Run the next event if it is before `limit`. False when there is none.

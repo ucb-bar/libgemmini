@@ -113,6 +113,7 @@ void reservation_station_t::complete(uint64_t id) {
   }
   if (!kicked[e.c.q]) kick(e.c.q);
   if (done_cb_ && e.c.tag >= 0) done_cb_(e.c.tag);
+  if (loop_done_cb_ && e.c.loop >= 0) loop_done_cb_(e.c.loop);
   if (room_cb_) room_cb_();
 }
 
