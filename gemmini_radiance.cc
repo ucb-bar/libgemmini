@@ -52,6 +52,11 @@ struct gemmini_radiance {
   uint64_t commands = 0, rejected = 0;
   bool warned[0x1000 / 8] = {};
   bool trace = getenv("GEMMINI_RADIANCE_TRACE") != nullptr;   // every register access to stderr
+  // GEMMINI_RADIANCE_SNAP=<dir>: the scratchpad after each LOOP_WS / SPAD_REQUANT's functional work, as
+  // <dir>/cmd<index>_f<funct>.bin (debugging the functional model against a golden's intermediates)
+  const char *snap = getenv("GEMMINI_RADIANCE_SNAP");
+  const uint8_t *smem = nullptr;
+  size_t smem_bytes = 0;
   uint64_t last_read_off = ~0ull, last_read_val = ~0ull, repeats = 0;
 
   void warn(uint32_t offset, const char *what) {
@@ -72,6 +77,8 @@ gemmini_radiance_t *gemmini_radiance_new(int mode, const char *preset, const cha
   g->mode = mode;
   g->func.reset(new gemmini_t);
   g->func->set_host(std::unique_ptr<gemmini_host_t>(new radiance_host_t(*soc)));
+  g->smem = soc->smem;
+  g->smem_bytes = (size_t)BANK_NUM * BANK_ROWS * DIM * sizeof(elem_t);
   g->func->reset();
   g->model.reset(new gperf::model_t(c));
   return g;
@@ -100,6 +107,11 @@ int gemmini_radiance_write(gemmini_radiance_t *g, uint64_t cycle, uint32_t offse
             (unsigned long long)g->commands, funct, (unsigned long long)g->rs1, (unsigned long long)g->rs2,
             (long long)t, e.what());
     abort();
+  }
+  if (g->snap && (funct == 8 || funct == 34)) {
+    char path[512];
+    snprintf(path, sizeof path, "%s/cmd%05llu_f%u.bin", g->snap, (unsigned long long)g->commands, funct);
+    if (FILE *f = fopen(path, "wb")) { fwrite(g->smem, 1, g->smem_bytes, f); fclose(f); }
   }
   return 1;
 }

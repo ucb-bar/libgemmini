@@ -164,6 +164,11 @@ struct gemmini_state_t
   std::vector<uint8_t> mx_scale_a_mem;
   std::vector<uint8_t> mx_scale_b_mem;
   std::vector<uint16_t> mx_smem;
+  // The RTL MX accumulator (single-format E4M3 loops): MX_ACC_ROWS rows x 64 BF16. A 16-row group holds a 16 x 64
+  // output block (tile t of 4 at columns 16t). LoopMatmul's compute and store cursors (0 / MX_ACC_ROWS/2) move
+  // independently: the compute one when a loop's computes issue, the store one when its stores do.
+  std::vector<uint16_t> mx_acc;
+  uint32_t mx_ex_acc_base, mx_st_acc_base;
 
   // FP6 LUTs: per-row 16 × 6-bit FP6 E3M2 codes (one byte each, low 6 bits).
   // Indexing: lut_x[lut_idx * 16 + entry] = code.
@@ -219,6 +224,7 @@ public:
   void mx_load_lut(reg_t rs1, reg_t rs2);
   void mx_loop_ws_spad(reg_t rs1, reg_t rs2);
   void mx_loop_spad_loads(reg_t rs2);
+  void mx_mvout_acc(reg_t dram_addr, reg_t sp_addr);
   void mx_loop_ws_dram(reg_t rs1, reg_t rs2);
   void loop_ws_config_scales(reg_t rs1, reg_t rs2);
   void loop_ws_config_scale_strides(reg_t rs1, reg_t rs2);

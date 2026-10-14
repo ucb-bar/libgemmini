@@ -27,6 +27,13 @@
 #else
 #define ACC_ROWS 1024
 #endif
+// The MX accumulator as LoopMatmul addresses it (max_acc_addr): rows of 64 BF16 entries; loops alternate halves.
+// MxGemminiRocketConfig 64 KiB = 512 rows, Radiance 32 KiB = 256 (nightly/mx.h ACC_ROWS)
+#if defined(GEMMINI_RADIANCE)
+#define MX_ACC_ROWS 256
+#else
+#define MX_ACC_ROWS 512
+#endif
 #define MAX_BYTES 64
 #define MAX_BLOCK_LEN (MAX_BYTES/(DIM*1))
 #define MAX_BLOCK_LEN_ACC (MAX_BYTES/(DIM*4))

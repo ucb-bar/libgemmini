@@ -94,6 +94,8 @@ void gemmini_state_t::reset()
   mx_scale_a_mem.clear(); mx_scale_a_mem.resize(8192, 0x7f);
   mx_scale_b_mem.clear(); mx_scale_b_mem.resize(8192, 0x7f);
   mx_smem.clear(); mx_smem.resize(sp_matrices * DIM * 16, 0);
+  mx_acc.assign((size_t)MX_ACC_ROWS * 64, 0);
+  mx_ex_acc_base = mx_st_acc_base = 0;
   mx_lut_a.clear(); mx_lut_a.resize(2048 * 16, 0);
   mx_lut_b.clear(); mx_lut_b.resize(2048 * 16, 0);
   mx_lut_c.clear(); mx_lut_c.resize(2048 * 16, 0);
@@ -295,8 +297,29 @@ void gemmini_t::mvin(reg_t dram_addr, reg_t sp_addr, int state_id) {
   }
 }
 
+// MVOUT from the MX accumulator (gemmini_state.mx_acc): rs2 = chunk[55:54] | rows[53:48] | cols[47:32] | acc row;
+// each row writes one 32-column BF16 half (chunk) of its 16 x 64 group to dram + r * CONFIG_ST stride (nightly
+// mx.h mvout_acc; LoopMatmulStCSpad reads the same groups). rs1[63:56] (quad outputs' second row) is not modelled.
+void gemmini_t::mx_mvout_acc(reg_t dram_addr, reg_t sp_addr) {
+  const uint32_t rows = (uint32_t)((sp_addr >> 48) & 0x3F), chunk = (uint32_t)((sp_addr >> 54) & 0x3);
+  const uint32_t row0 = (uint32_t)(sp_addr & 0x1FFFFFFF);
+  const bool relu = gemmini_state.acc_act == gemmini_state_t::RELU;
+  dram_addr &= 0x00FFFFFFFFFFFFFFULL;
+  for (uint32_t r = 0; r < rows; r++)
+    for (uint32_t e = 0; e < 32; e++) {
+      uint16_t v = gemmini_state.mx_acc[(size_t)((row0 + r) % MX_ACC_ROWS) * 64 + chunk * 32 + e];
+      if (relu && (v & 0x8000)) v = 0;
+      write_to_dram<uint16_t>(dram_addr + r * gemmini_state.store_stride + e * 2, v);
+    }
+}
+
 void gemmini_t::mvout(reg_t dram_addr, reg_t sp_addr) {
   bool const accumulator = (sp_addr >> 31) & 0x1;
+  // an MX build's accumulator holds the MX loops' results (mx_acc), not the stock int32 accumulator
+  if (accumulator && gemmini_state.mx_scales_used) {
+    mx_mvout_acc(dram_addr, sp_addr);
+    return;
+  }
   bool const full = (sp_addr >> 29) & 0x1;
   auto const norm_cmd = static_cast<gemmini_state_t::NormCmd>((sp_addr >> 26) & 0x7);
   auto const base_row_addr = (sp_addr & 0x3FFFFFF); // Strip accumulator addressing bits [31:26]
@@ -1457,6 +1480,9 @@ void gemmini_t::mx_loop_ws_spad(reg_t rs1, reg_t rs2) {
   // passes it -- gemmini_loop_ws_spad's macro ends `| ((full_C) << 1) | (ex_accumulate)` -- but this
   // handler used to discard rs1 wholesale, so the MX path ALWAYS accumulated.
   const bool ex_accumulate = rs1 & 1;
+  // A loop that skips its computes (rs2[6]) and its stores (rs2[7]) only loads (mx_loop_spad_loads): in every
+  // format it writes no output (the RTL's ex / st unrollers never start) -- a K / V / Q load loop's C_spad is 0
+  if (((rs2 >> 6) & 1) && ((rs2 >> 7) & 1)) return;
 
   const uint32_t C_spad = (uint32_t)((rs2 >> 32) & 0xFFFFFFFFu);
   const uint16_t TI = gemmini_state.loop_ws_I;
@@ -1579,7 +1605,31 @@ void gemmini_t::mx_loop_ws_spad(reg_t rs1, reg_t rs2) {
     const uint32_t B_sp = gemmini_state.mx_loop_b_spad - (uint32_t)TK * TJ * DIM;
     const int M_DIM = TI * TM;
     const int N_DIM = TJ * TN;
-    clear_smem_if_overwrite(M_DIM, N_DIM);
+    // Single x single: the accumulator as the RTL has it (gemmini_state.mx_acc). The computes accumulate into the
+    // compute half, tile (i, j) at c_start + (i*ceil4(J) + j)*DIM/4 (LoopMatmulExecute c_addr: a 16-row group = 4
+    // tiles); the stores read the store half by 16-row groups (LoopMatmulStCSpad src_addr) and stage it into
+    // mx_smem for the requant / deposit below. rs2[6] skips the computes, rs2[7] the stores; a cursor moves when its
+    // unit issues for a loop with inc_acc (spad) or a C address (DRAM), LoopMatmul.scala:1654-1658, 1755-1759.
+    // Single x quad keeps the per-loop buffer (narrow tiles, not modelled here).
+    const bool acc_model = !wgt_quad;
+    const bool skip_ex = acc_model && ((rs2 >> 6) & 1), skip_st = acc_model && ((rs2 >> 7) & 1);
+    const uint32_t acc_half = MX_ACC_ROWS / 2;
+    const bool moves = gemmini_state.mx_dram_out ? gemmini_state.mx_dram_C != 0 : ((rs2 >> 8) & 1);
+    const uint32_t ex_base = gemmini_state.mx_ex_acc_base, st_base = gemmini_state.mx_st_acc_base;
+    if (acc_model && moves && !skip_ex) gemmini_state.mx_ex_acc_base = (ex_base + acc_half) % MX_ACC_ROWS;
+    if (acc_model && moves && !skip_st) gemmini_state.mx_st_acc_base = (st_base + acc_half) % MX_ACC_ROWS;
+    const uint32_t row_groups_j = (uint32_t)(TJ + 3) / 4;   // ceil(J/4) 16-row groups per tile row
+    auto acc_at = [&](uint32_t base, int m, int n) -> uint16_t & {
+      const uint32_t row = (base + ((uint32_t)m / 16 * row_groups_j + (uint32_t)n / 64) * 16 + (uint32_t)m % 16) %
+                           MX_ACC_ROWS;
+      return gemmini_state.mx_acc[(size_t)row * 64 + (size_t)n % 64];
+    };
+    if (!acc_model) {
+      clear_smem_if_overwrite(M_DIM, N_DIM);
+    } else if (!skip_ex && !ex_accumulate) {   // the first k-step overwrites (accumulate = ex_accumulate || k != 0)
+      for (int m = 0; m < M_DIM; m++)
+        for (int n = 0; n < N_DIM; n++) acc_at(ex_base, m, n) = 0;
+    }
 
     // Single act x single wgt: model the RTL ScaleFactorMem read address -- tile counters (i fastest)
     // that wrap at the CONFIG_SCALE_MEM bounds and persist across loops, plus the act/wgt half select
@@ -1594,7 +1644,7 @@ void gemmini_t::mx_loop_ws_spad(reg_t rs1, reg_t rs2) {
     const uint16_t sc_lbk = gemmini_state.mx_tiles_K ? gemmini_state.mx_tiles_K : 1;
     uint16_t &sc_ci = gemmini_state.mx_sc_ci, &sc_cj = gemmini_state.mx_sc_cj, &sc_ck = gemmini_state.mx_sc_ck;
 
-    for (uint16_t k_outer = 0; k_outer < TK; k_outer++) {
+    for (uint16_t k_outer = 0; k_outer < (skip_ex ? 0 : TK); k_outer++) {
       const size_t group = (size_t)(k_outer * DIM) / GROUP;
       for (uint16_t j = 0; j < TJ; j++) {
         for (uint16_t i = 0; i < TI; i++) {
@@ -1637,9 +1687,9 @@ void gemmini_t::mx_loop_ws_spad(reg_t rs1, reg_t rs2) {
               float s = fpe8m0_decode(s_code);
               float scaled = bf16_round(Ct[r][c] * s);
               const size_t idx = smem_base + (size_t)(i*TM + r) * N_DIM + (j*TN + c);
-              if (idx >= gemmini_state.mx_smem.size()) continue;
-              float prev = bf16_to_f32(gemmini_state.mx_smem[idx]);
-              gemmini_state.mx_smem[idx] = f32_to_bf16_rne(bf16_accum_add(prev, scaled));
+              if (!acc_model && idx >= gemmini_state.mx_smem.size()) continue;
+              uint16_t &acc = acc_model ? acc_at(ex_base, i*TM + r, j*TN + c) : gemmini_state.mx_smem[idx];
+              acc = f32_to_bf16_rne(bf16_accum_add(bf16_to_f32(acc), scaled));
             }
           if (sc_rtl) {   // one counter step per tile, in the RTL's order (i, then j, then k)
             if (sc_ci + 1 < sc_lbi) sc_ci++;
@@ -1651,6 +1701,15 @@ void gemmini_t::mx_loop_ws_spad(reg_t rs1, reg_t rs2) {
           }
         }
       }
+    }
+
+    if (acc_model) {   // the stores: the store half's groups, staged in mx_smem as the requant / deposit read them
+      if (skip_st) return;
+      for (int m = 0; m < M_DIM; m++)
+        for (int n = 0; n < N_DIM; n++) {
+          const size_t idx = smem_base + (size_t)m * N_DIM + n;
+          if (idx < gemmini_state.mx_smem.size()) gemmini_state.mx_smem[idx] = acc_at(st_base, m, n);
+        }
     }
 
     // FP8 requant post-pass: when out_mx_fmt == 0 (FP8 E4M3) we replace the BF16
