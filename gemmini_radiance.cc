@@ -63,7 +63,7 @@ extern "C" {
 gemmini_radiance_t *gemmini_radiance_new(int mode, const char *preset, const char *overrides,
                                          const gemmini_radiance_soc_t *soc) {
   if (!soc || !soc->smem || soc->smem_bytes < (uint64_t)BANK_NUM * BANK_ROWS * DIM * sizeof(elem_t)) return nullptr;
-  gperf::config_t c = gperf::config_t::make(preset, overrides);
+  gperf::config_t c = gperf::config_t::make(preset && *preset ? preset : "radiance", overrides);
   c.host_kind = 1;
   auto *g = new gemmini_radiance;
   g->mode = mode;

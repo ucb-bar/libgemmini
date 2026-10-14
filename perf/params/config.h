@@ -6,7 +6,7 @@
 // Every parameter is one line of GPERF_PARAMS: section, name, default, and where the number comes from.
 // The defaults are MxGemminiRocketConfig (RTL refs are relative to generators/gemmini/src/main/scala/gemmini/).
 // A preset (config.cc) changes a few of them, the way a config fragment does. At run time, without rebuilding:
-//   GEMMINI_PERF_CONFIG=mx_rocket|e4m3_vpu                         pick a preset (default mx_rocket)
+//   GEMMINI_PERF_CONFIG=mx_rocket|e4m3_vpu|firesim|e3m2_lut|radiance  pick a preset (default mx_rocket)
 //   GEMMINI_PERF_SET="rs.ex_entries=8,mem.dram_bytes_per_cycle=16"   override any parameter by section.name
 //   GEMMINI_PERF_DUMP_CONFIG=1                                     print the resolved parameters at start
 //
@@ -175,6 +175,7 @@ struct config_t {
 // Presets: the config fragments. Each starts from the defaults above.
 config_t preset_mx_rocket();   // MxGemminiRocketConfig
 config_t preset_e4m3_vpu();    // MxE4M3VpuGemminiRocketConfig: VPU x2, SPAD_REQUANT, ld RS 32, no LUT
+config_t preset_radiance();    // WithRadianceE4M3MxGemmini: MMIO in a Radiance cluster, spad = shared memory (host.kind 1)
 
 }  // namespace gperf
 

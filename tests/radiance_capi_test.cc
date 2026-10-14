@@ -97,6 +97,21 @@ int main(int argc, char **argv) {
   const uint64_t occ_after_issue = rd(0x28);
   cmd(8, 0, ((uint64_t)C_SP << 32) | (1ull << 9) | (1ull << 5));                    // LOOP_WS: skip ld D only
   const uint64_t occ_after_loop = rd(0x28);
+  // back-pressure: CONFIG_LD (B, same stride) eight times, one INST store per cycle (RS1/RS2 latched once). A
+  // non-loop command waits in the command path until the loop ahead is unrolled, so the path fills and refuses
+  gemmini_radiance_write(g, cycle++, 0x10, ((uint64_t)DIM << 16) | (1ull << 8) | (1 << 3) | 1, 8);
+  gemmini_radiance_write(g, cycle++, 0x18, N, 8);
+  const uint64_t refused_before = refused;
+  bool ready_low = false;
+  for (int n = 0; n < 8; n++) {
+    while (!gemmini_radiance_write(g, cycle, 0x00, 0x7Bu | (3u << 12) | (1u << 15) | (2u << 20), 4)) {
+      ready_low |= rd(0x08) == 0;
+      refused++;
+      cycle++;
+    }
+    cycle++;
+  }
+  if (refused == refused_before || !ready_low) { printf("FAIL: a burst behind a LOOP_WS was never refused\n"); }
 
   const uint64_t issued = cycle;
   uint64_t busy_polls = 0;
@@ -109,7 +124,7 @@ int main(int argc, char **argv) {
   printf("OCCUPANCY before LOOP_WS %llu, right after %llu, at fence %llu; RETIRED %llu\n",
          (unsigned long long)occ_after_issue, (unsigned long long)occ_after_loop, (unsigned long long)occ,
          (unsigned long long)retired);
-  int bad = 0;
+  int bad = (refused == 0);
   if (retired != 1 || occ != 0) { printf("FAIL: RETIRED should be 1 and OCCUPANCY 0 after the fence\n"); bad++; }
 
   if (!perf) {

@@ -43,7 +43,7 @@ enum gemmini_radiance_mode {
   GEMMINI_RADIANCE_BOTH = 1,   // functional (bit-exact) + timing
 };
 
-// preset / overrides: the timing parameters (perf/params/config.h): a preset name (nullptr: the default) and
+// preset / overrides: the timing parameters (perf/params/config.h): a preset name (nullptr: radiance) and
 // "section.name=value,..." (nullptr: none). Returns nullptr if the shared memory is smaller than the scratchpad.
 gemmini_radiance_t *gemmini_radiance_new(int mode, const char *preset, const char *overrides,
                                          const gemmini_radiance_soc_t *soc);

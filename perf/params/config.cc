@@ -48,6 +48,32 @@ config_t preset_firesim() {
   return c;
 }
 
+// Radiance: WithRadianceE4M3MxGemmini in a Radiance cluster (RadianceE4M3MxGemminiSingleClusterTraceConfig, VCS
+// simv of 2026-10-07 11:37: after 42c9871 and b0dd6cb). Gemmini is e4m3SingleNoLutMxFPConfig + spad requant + loop
+// retire counter: the same standaloneMxFPConfig pipeline as MxGemminiRocketConfig (spad_read_delay 4, acc_latency 3,
+// mesh_output_delay 1, tile_latency 0, 2 acc banks, 32 Gets in flight), so the mx_rocket latencies stand until the
+// Radiance waveforms say otherwise. What the SoC changes: an MMIO command path, the scratchpad in the cluster's shared
+// memory (128 KiB), a 32 KiB accumulator, 32 B cache blocks on a 256-bit system bus.
+config_t preset_radiance() {
+  config_t c = preset_mx_rocket();
+  c.preset = "radiance";
+  c.host_kind = 1;
+  c.mem_host_tracking = 0;          // Gemmini's DMA probes no CPU L1 (the Muon caches are not coherent with it)
+  c.frontend_depth = 6;             // GemminiTile's INST register drives io.cmd: raw_cmd_q, LoopConv, LoopMatmul (3 x 2)
+  c.frontend_latency = 3;           // [estimate] one cycle per queue (the RoCC path's 5 included the core side)
+  c.spad_bank_rows = 2048;          // sp_capacity = smem 128 KiB over 4 banks (TapeoutSmemConfig)
+  c.acc_bank_rows = 128;            // acc_capacity 32 KiB = 256 rows (radiance-kernels nightly/mx.h ACC_ROWS)
+  c.acc_total_rows = 256;           //   ... alternating halves of 128 (mx.h ACC_HALF)
+  c.mem_line_bytes = 32;            // WithCacheBlockBytes(32) (RadianceBaseConfig)
+  c.mem_bus_bytes = 32;             // WithSystemBusWidth(256)
+  c.dma_get_bytes = 32;             // dma_maxbytes = CacheBlockBytes
+  c.dma_put_bytes = 32;
+  c.scale_get_bytes = 32;           // the scale loader's Gets are at most a line
+  c.rs_packed_preload_align = 1;    // b0dd6cb is in the simv
+  c.rs_scale_cfg_waits_loads = 0;   // 42c9871 is in the simv
+  return c;
+}
+
 bool config_t::set(const std::string &name, double v) {
 #define GPERF_SET(sec, n, def, doc) if (name == #sec "." #n) { sec##_##n = v; return true; }
   GPERF_PARAMS(GPERF_SET)
@@ -69,7 +95,8 @@ config_t config_t::make(const char *p, const char *s) {
   else if (!strcmp(p, "e4m3_vpu")) c = preset_e4m3_vpu();
   else if (!strcmp(p, "firesim")) c = preset_firesim();
   else if (!strcmp(p, "e3m2_lut")) c = preset_e3m2_lut();
-  else { fprintf(stderr, "gemmini perf: unknown GEMMINI_PERF_CONFIG=%s (mx_rocket|e4m3_vpu|firesim|e3m2_lut)\n", p); abort(); }
+  else if (!strcmp(p, "radiance")) c = preset_radiance();
+  else { fprintf(stderr, "gemmini perf: unknown GEMMINI_PERF_CONFIG=%s (mx_rocket|e4m3_vpu|firesim|e3m2_lut|radiance)\n", p); abort(); }
 
   if (s) {
     std::string all(s);
