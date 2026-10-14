@@ -73,18 +73,7 @@ int main(int argc, char **argv) {
   for (uint32_t i = 0; i < M * K; i++) dram[HOST | (A_ADDR + i)] = A[i];
   for (uint32_t i = 0; i < K * N; i++) dram[HOST | (B_ADDR + i)] = B[i];
   for (uint32_t i = 0; i < 1024; i++) dram[HOST | (SC_ADDR + i)] = 127;   // E8M0 1.0
-  // A and B resident in the scratchpad (shared memory) in LoopMatmul's tile layout: A tile (i,k) at
-  // A_SP + (i*KT + k)*16, B tile (k,j) at B_END - KT*J*16 + (k*J + j)*16; tile row r = 16 bytes of that row.
-  // (The loop's own DRAM loads in scratchpad mode are not modelled yet: the loop skips them.)
-  for (uint32_t i = 0; i < I; i++)
-    for (uint32_t k = 0; k < KT; k++)
-      for (uint32_t r = 0; r < DIM; r++)
-        memcpy(&smem[(size_t)(A_SP + (i * KT + k) * DIM + r) * DIM], &A[(i * DIM + r) * K + k * DIM], DIM);
-  for (uint32_t k = 0; k < KT; k++)
-    for (uint32_t j = 0; j < J; j++)
-      for (uint32_t r = 0; r < DIM; r++)
-        memcpy(&smem[(size_t)(B_END - KT * J * DIM + (k * J + j) * DIM + r) * DIM], &B[(k * DIM + r) * N + j * DIM],
-               DIM);
+  // A and B stay in DRAM: the scratchpad-mode LOOP_WS loads them itself (RTL LdA / LdB), as gemm_mx relies on
 
   gemmini_radiance_soc_t soc = {nullptr, mem_load, mem_store, smem.data(), smem.size()};
   g = gemmini_radiance_new(perf ? GEMMINI_RADIANCE_PERF : GEMMINI_RADIANCE_BOTH, nullptr, nullptr, &soc);
@@ -106,7 +95,7 @@ int main(int argc, char **argv) {
   cmd(9, 0, ((uint64_t)KT << 32) | ((uint64_t)J << 16) | I);                         // LOOP_WS_CONFIG_BOUNDS
   cmd(24, A_SP, B_END);                                                              // LOOP_WS_CONFIG_SPAD_AB
   const uint64_t occ_after_issue = rd(0x28);
-  cmd(8, 0, ((uint64_t)C_SP << 32) | (1ull << 9) | (7ull << 3));                    // LOOP_WS: skip ld A, B, D
+  cmd(8, 0, ((uint64_t)C_SP << 32) | (1ull << 9) | (1ull << 5));                    // LOOP_WS: skip ld D only
   const uint64_t occ_after_loop = rd(0x28);
 
   const uint64_t issued = cycle;

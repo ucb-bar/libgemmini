@@ -66,8 +66,9 @@ void loop_matmul_t::run(uint64_t rs1, uint64_t rs2, cycle_t now, double out_byte
   l.reads_act0 = l.A_sc ? (l.slot % 2 == 0) : reads_act0;
   l.total[L_LDS] = l.A_sc ? (l.a_reuse ? 1 : 2) : 0;
   l.total[L_SCFG] = l.A_sc ? 1 : 0;
-  l.total[L_LDA] = (!l.spad_only && !skip_lda && l.A) ? l.I * ceil_div(l.K, mbl_) : 0;
-  l.total[L_LDB] = (!l.spad_only && !skip_ldb && l.B) ? l.K * ceil_div(l.J, mbl_) : 0;
+  // LdA / LdB run in scratchpad mode too (ldA.io.req.valid has no spad_only term, LoopMatmul.scala:1509)
+  l.total[L_LDA] = (!skip_lda && l.A) ? l.I * ceil_div(l.K, mbl_) : 0;
+  l.total[L_LDB] = (!skip_ldb && l.B) ? l.K * ceil_div(l.J, mbl_) : 0;
   l.total[L_EX] = skip_ex ? 0 : l.I * l.J * l.K;
   l.total[L_STC] = (!l.spad_only && !skip_st && l.C) ? l.I * stc_per_i(l.J) : 0;
   // multi-elem: one store per (i, j) tile, no chunks (LoopMatmulStCSpad iter_max_j = max_j, :822, :961)

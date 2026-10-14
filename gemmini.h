@@ -218,6 +218,7 @@ public:
   void mx_read_smem(reg_t rs1, reg_t rs2);
   void mx_load_lut(reg_t rs1, reg_t rs2);
   void mx_loop_ws_spad(reg_t rs1, reg_t rs2);
+  void mx_loop_spad_loads(reg_t rs2);
   void mx_loop_ws_dram(reg_t rs1, reg_t rs2);
   void loop_ws_config_scales(reg_t rs1, reg_t rs2);
   void loop_ws_config_scale_strides(reg_t rs1, reg_t rs2);

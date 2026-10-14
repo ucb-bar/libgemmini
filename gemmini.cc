@@ -1421,6 +1421,26 @@ void gemmini_t::mx_loop_ws_dram(reg_t rs1, reg_t rs2) {
   gemmini_state.mx_loop_spad_marker = false;
 }
 
+// A scratchpad-mode LOOP_WS's own operand loads: LoopMatmul's LdA / LdB run in either mode (ldA.io.req.valid has
+// no spad_only term, LoopMatmul.scala:1509), from the sticky LOOP_WS_CONFIG_ADDRS_AB addresses into the
+// LOOP_WS_CONFIG_SPAD_AB tile layout -- A tile (i,k) at a_start + (i*K + k)*DIM, B tile (k,j) at
+// b_end - K*J*DIM + (k*J + j)*DIM (:64-68, :178-182) -- unless skipped (rs2[3] / rs2[4]) or the address is 0 (:93).
+void gemmini_t::mx_loop_spad_loads(reg_t rs2) {
+  const uint16_t I = gemmini_state.loop_ws_I, J = gemmini_state.loop_ws_J, K = gemmini_state.loop_ws_K;
+  const uint32_t A_sp = gemmini_state.mx_loop_a_spad;
+  const uint32_t B_sp = gemmini_state.mx_loop_b_spad - (uint32_t)K * J * DIM;
+  if (!((rs2 >> 3) & 1))
+    for (uint16_t i = 0; i < I && gemmini_state.loop_ws_A != 0; i++)
+      for (uint16_t k = 0; k < K; k++)
+        mvin(gemmini_state.loop_ws_A + (i * gemmini_state.loop_ws_A_stride + k) * DIM * sizeof(elem_t),
+             ((uint64_t)DIM << 48) | ((uint64_t)DIM << 32) | (A_sp + (i * K + k) * DIM), 0);
+  if (!((rs2 >> 4) & 1))
+    for (uint16_t k = 0; k < K && gemmini_state.loop_ws_B != 0; k++)
+      for (uint16_t j = 0; j < J; j++)
+        mvin(gemmini_state.loop_ws_B + (k * gemmini_state.loop_ws_B_stride + j) * DIM * sizeof(elem_t),
+             ((uint64_t)DIM << 48) | ((uint64_t)DIM << 32) | (B_sp + (k * J + j) * DIM), 1);
+}
+
 void gemmini_t::mvout_spad(reg_t rs1, reg_t rs2) {
   (void)rs1; (void)rs2;
 }
@@ -2575,6 +2595,7 @@ reg_t gemmini_t::CUSTOMFN(XCUSTOM_ACC)(rocc_insn_t insn, reg_t xs1, reg_t xs2) {
   } else if (insn.funct == loop_ws_funct) {
     const bool mx_spad = (xs2 >> 9) & 0x1;
     if (mx_spad) {
+      mx_loop_spad_loads(xs2);
       mx_loop_ws_spad(xs1, xs2);
     } else if (gemmini_state.mx_scales_used || gemmini_state.loop_ws_A_sc != 0) {
       mx_loop_ws_dram(xs1, xs2);
