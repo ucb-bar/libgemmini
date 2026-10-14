@@ -5,7 +5,8 @@ namespace gperf {
 load_unit_t::load_unit_t(const config_t &c, event_queue_t &eq, dma_reader_t &dma, scratchpad_t &sp,
                          reservation_station_t &rs)
     : eq_(eq), dma_(dma), sp_(sp), rs_(rs), dim_((uint32_t)c.mesh_dim), queue_len_((size_t)c.ld_queue_length),
-      max_running_((uint32_t)c.ld_cmds_in_flight), lag_((cycle_t)c.ld_completion_lag) {}
+      max_running_((uint32_t)c.ld_cmds_in_flight), lag_((cycle_t)c.ld_completion_lag),
+      start_lat_((cycle_t)c.ld_start_latency) {}
 
 void load_unit_t::config(uint64_t rs1, uint64_t rs2) {
   const int id = (int)((rs1 >> 3) & 0x3) % 3;
@@ -35,9 +36,9 @@ void load_unit_t::try_start() {
     const uint32_t row_bytes = j.m.cols * elem_bytes;
     bytes_ += (uint64_t)j.m.rows * row_bytes;
     auto finish = [this, id = j.id](cycle_t t) {
-      running_--;
       eq_.at(t + lag_, [this, id] { rs_.complete(id); });
-      try_start();
+      // the freed tracker slot reaches the next waiting command's first Get start_lat_ later
+      eq_.at(t + start_lat_, [this] { running_--; try_start(); });
     };
     if (j.m.dram == 0) {
       const uint32_t blocks = (j.m.cols + dim_ - 1) / dim_;

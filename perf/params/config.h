@@ -55,6 +55,7 @@
   X(loop, max_st_outstanding,       4,    "loop-issued stores in the RS, not completed") \
   /* --- reservation station (ReservationStation.scala; entries ConfigsFP.scala:232-234) --- */ \
   X(rs, vec_pending_gate,           1,    "[knob] a vector entry waits while a scratchpad bank it touches has store rows in flight (io.vpu_pending_banks, ReservationStation.scala:574-578)") \
+  X(rs, scale_cfg_waits_loads,      1,    "[knob, RTL version] CONFIG_SCALE_MEM waits for every older queued mvin (its garbage op ranges overlapped them: a false RAW, removed in 42c9871 2026-10-03, ReservationStation.scala:524). 1 = the 09-28 MxGemminiRocketConfig sims (llama_mlp_tiny_db: the loop's scale config at +1364 behind mvins 6-9); presets e4m3_vpu / firesim: 0") \
   X(rs, packed_preload_align,       0,    "[knob, RTL version] packed MX acc: a preload's C range starts at its DIM-row group (no spill into the next row group's stores: ReservationStation.scala:302-307, commit b0dd6cb 2026-10-05). 0 = older RTL (MxGemminiRocketConfig sim of 09-29: the spill and its store/mesh stalls are real, 13.5); presets e4m3_vpu / firesim: 1") \
   X(rs, ld_entries,                 8,    "load queue entries") \
   X(rs, ex_entries,                 16,   "execute queue entries") \
@@ -79,11 +80,13 @@
   X(acc, total_rows,                512,  "max_acc_addr: loop C bases alternate by total_rows / concurrent_loops") \
   /* --- load path (LoadController.scala, DMA.scala StreamReader, BeatMerger.scala) --- */ \
   X(ld, queue_length,               8,    "issued mvins waiting in the LoadController queue (ConfigsFP.scala:228)") \
+  X(ld, start_latency,              6,    "[measured] a load command's last row written -> the next waiting command's first Get (cmd tracker -> LoadController -> DMA -> reader -> TLB -> A: last response -> next Get 7 in the llama_e2e_elemwise FSDB)") \
   X(ld, cmds_in_flight,             3,    "mvin commands the load tracker overlaps (:84,94)") \
   X(ld, completion_lag,             2,    "last spad row written -> RS completion") \
   X(dma, get_bytes,                 64,   "bytes per TileLink Get (dma_maxbytes; 64-aligned)") \
   X(dma, gets_per_cycle,            1,    "Gets the StreamReader issues per cycle") \
   X(dma, max_in_flight,             32,   "outstanding Gets (max_in_flight_mem_reqs)") \
+  X(dma, free_latency,              3,    "[measured] ooo_free: a response -> the next Get when the tracker is full (llama_e2e_elemwise FSDB: 3 for 290 of 293, perf_reissue.py)") \
   X(dma, ooo_free,                  1,    "[knob, RTL] 1: a response is packed into the scratchpad when it arrives and frees its tracker slot then (XactTracker pop on the beat packer's last beat, DMA.scala:84-85: arrival order); 0: merged and freed in request order (older model)") \
   X(dma, spad_write_bytes_per_cycle,16,   "BeatMerger: one DIM-byte spad row per cycle") \
   X(dma, put_bytes,                 64,   "bytes per TileLink Put") \
@@ -116,14 +119,17 @@
   X(mem, l2_hit_latency,            12,   "Get accepted -> data, L2 hit: mx_mem_bw B_warm_16B lat_req 12") \
   X(mem, client_hit_latency,        10,   "same, for the MX scale / LUT loaders' own client: mx_mem_bw scale_warm (8 slots, 64 Gets, 85 cyc)") \
   X(mem, l2_miss_detect,            6,    "[measured] Get/Put accepted -> the L2's AcquireBlock to DRAM on a miss (llama_e2e_elemwise FSDB: 6, p90 7)") \
+  X(mem, l2_partial_fill_to_data,   4,    "[measured] a sub-line (8 B) Get that missed: data this long after the fill's FIRST beat (LUT loader misses: Get-to-Get 35-36 = first beat ~24 + ...; matmul_tiled_fp6_128x128_chain FSDB)") \
   X(mem, l2_fill_to_data,           7,    "[measured] the fill's last DRAM beat -> the first data back to the requester (same: median 7)") \
-  X(mem, dram_latency,              20,   "DRAM, unloaded, after its line slot: L2 DRAM-side median 23 (MLP down-loop FSDB); loaded latency is queueing") \
-  X(mem, dram_model,                0,    "[knob, optional] 0 = fixed pipe (latency + line slot); 1 = + open-row banks (DRAMSim2 DDR3, testchipip dramsim2_ini). Changes the regression < 1% (13.8)") \
+  X(mem, dram_latency,              24,   "[measured] DRAM, unloaded, after its line slot, to the LAST beat: L2 DRAM-side fill with no other fill outstanding 32 = 8 + 24 (llama_e2e_elemwise FSDB, perf_l2_fill_latency.py); the older 20 came from a first-beat median (23)") \
+  X(mem, dram_model,                1,    "[knob] 1 = open-row banks (DRAMSim2 DDR3, testchipip dramsim2_ini) -- an L2 write-back opens its own row, so the read stream in that bank pays a row miss after it (llama_e2e_elemwise: ~63 write-backs per load burst; rmsnorm1 -16 -> -5 %); 0 = fixed pipe (latency + line slot)") \
   X(mem, dram_banks,                8,    "[knob] DDR3 NUM_BANKS; scheme2 mapping: bank = line % banks") \
   X(mem, dram_lines_per_row,        256,  "[knob] lines per bank row: NUM_COLS 2048 / BL 8 (row = line / (banks * this))") \
   X(mem, dram_row_miss_cycles,      15,   "[knob] tRP + tRCD = 20 tCK x 1.5 ns at 500 MHz: extra latency of a row miss") \
   X(mem, dram_rc_cycles,            26,   "[knob] tRC = tRAS + tRP = 34 tCK: a bank's next activate after the last") \
   X(mem, dram_max_reads,            0,    "[knob] DRAM reads outstanding at once (FASED maxReads = 16 on FireSim); 0 = unlimited (VCS DRAMSim2: queue 32, never binding)") \
+  X(mem, dram_refresh_interval,     3900, "[measured] DRAM refresh: one every this many cycles (llama_e2e_elemwise FSDB: L2 DRAM-side stalls every 3,845-3,906 cycles, perf_dram_stalls.py; DRAMSim2 tREFI). 0 = none") \
+  X(mem, dram_refresh_cycles,       85,   "[measured] ... during which the DRAM returns nothing (stalls of 57-104, median ~85)") \
   X(mem, dram_bytes_per_cycle,      8,    "DRAM channel: one 64 B line per 8 cycles at the L2's DRAM side (dramloop FSDB)") \
   X(mem, bus_bytes,                 64,   "[knob] system-bus beat (WithSystemBusWidth/8): a line-sized Put takes line/bus_bytes cycles. 512-bit in every current build; the pre-09-28 MX build was 256-bit (a TLWidthWidget split each Put in two)") \
   X(mem, write_ack_latency,         22,   "[measured] PutPartial accepted -> ack, first Put to an idle line the L2 holds (chain_pipelined FSDB: +18..28)") \
@@ -139,6 +145,7 @@
   X(scale, bytes_per_cycle,         8,    "retire rate: one 8-byte word per cycle") \
   X(scale, row_bubble,              1,    "cycles between rows of a 2-D load") \
   /* --- LUT loader, outside the RS (Controller.scala:723-833): one 8-byte Get at a time --- */ \
+  X(lut, hit_latency,               7,    "[measured] LUT loader 8-B Get -> data, L2 hit: Get-to-Get gap 8-9 (216 of 288, matmul_tiled_fp6_128x128_chain FSDB)") \
   X(lut, fixed_cycles,              2,    "per MX_LOAD_LUT besides the word Gets") \
   /* --- VPU (vpu/Vpu.scala) and SPAD_REQUANT (SpadRequant.scala). Not calibrated yet (plan step 5) --- */ \
   X(vpu, units,                     0,    "VPU units (0 = none; e4m3_vpu preset: 2)") \

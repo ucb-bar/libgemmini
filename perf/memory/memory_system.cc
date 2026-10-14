@@ -1,5 +1,3 @@
-#include <cstdio>
-#include <cstdlib>
 #include "memory_system.h"
 
 #include <algorithm>
@@ -19,6 +17,8 @@ memory_system_t::memory_system_t(const config_t &c, event_queue_t &eq)
       put_serial_((cycle_t)c.mem_l2_put_serial_cycles),
       fill_secondary_first_((cycle_t)c.mem_l2_fill_secondary_first),
       fill_secondary_next_((cycle_t)c.mem_l2_fill_secondary_next),
+      partial_fill_to_data_((cycle_t)c.mem_l2_partial_fill_to_data),
+      refresh_interval_((cycle_t)c.mem_dram_refresh_interval), refresh_cycles_((cycle_t)c.mem_dram_refresh_cycles),
       l1_ways_((uint32_t)c.mem_host_l1_ways), l1_random_(c.mem_host_l1_random != 0),
       probe_issue_((cycle_t)c.mem_probe_issue_latency), probe_cycles_((cycle_t)c.mem_probe_cycles),
       probe_lat_((cycle_t)c.mem_probe_latency), probe_put_ack_((cycle_t)c.mem_probe_put_ack_latency) {
@@ -170,7 +170,8 @@ void memory_system_t::evict(uint64_t victim) {
   if (it->second.dirty) {   // write-back: a DRAM line slot nobody waits for
     writebacks_++;
     trace_ev_addr("l2wb", eq_.now(), (unsigned long long)victim * line_bytes_);
-    dram_.request(0, eq_.now(), dram_cycles_per_line_, [](cycle_t) {});
+    // the write opens its own row: with the bank model, the read stream in that bank pays a row miss after it
+    dram_request(eq_.now(), [this, victim](cycle_t d) { if (dram_banked_) dram_ready(victim, d); });
   }
   lru_.erase(it->second.pos);
   lines_.erase(it);
@@ -204,7 +205,7 @@ void memory_system_t::insert(uint64_t line, cycle_t ready, bool dirty) {
       if (v.dirty) {          // write-back: a DRAM line slot nobody waits for
         writebacks_++;
         trace_ev_addr("l2wb", eq_.now(), (unsigned long long)victim * line_bytes_);
-        dram_.request(0, eq_.now(), dram_cycles_per_line_, [](cycle_t) {});
+        dram_request(eq_.now(), [this, victim](cycle_t d) { if (dram_banked_) dram_ready(victim, d); });
       }
       lines_.erase(victim);
       lru_.pop_back();
@@ -212,7 +213,7 @@ void memory_system_t::insert(uint64_t line, cycle_t ready, bool dirty) {
   }
 }
 
-void memory_system_t::lookup(uint64_t line, cycle_t t, done_t back, cycle_t hit_lat) {
+void memory_system_t::lookup(uint64_t line, cycle_t t, done_t back, cycle_t hit_lat, bool partial) {
   auto it = lines_.find(line);
   if (it != lines_.end()) {
     hits_++;
@@ -228,8 +229,10 @@ void memory_system_t::lookup(uint64_t line, cycle_t t, done_t back, cycle_t hit_
   }
   misses_++;
   insert(line, NEVER);
-  lines_[line].waiters.push_back([this, back, t, hit_lat](cycle_t r) {
-    const cycle_t at = cmax(r + fill_to_data_, t + hit_lat);   // the L2 writes the fill, then responds
+  lines_[line].waiters.push_back([this, back, t, hit_lat, partial](cycle_t r) {
+    // the L2 writes the fill, then responds; a sub-line Get is served once the fill's first beat is in
+    const cycle_t at = partial ? cmax(r - (dram_cycles_per_line_ - 1) + partial_fill_to_data_, t + hit_lat)
+                               : cmax(r + fill_to_data_, t + hit_lat);
     eq_.at(at, [back, at] { back(at); });
   });
   fetch(line, t + miss_detect_);   // the L2 detects the miss before it asks DRAM
@@ -248,6 +251,19 @@ cycle_t memory_system_t::dram_ready(uint64_t line, cycle_t d) {
   return act + row_miss_ + dram_lat_;
 }
 
+void memory_system_t::dram_request(cycle_t earliest, done_t done) {
+  if (refresh_interval_ > 0 && refresh_cycles_ > 0) {
+    const cycle_t now = eq_.now(), horizon = cmax(earliest, now) + 4 * refresh_cycles_;
+    if (next_refresh_ == 0) next_refresh_ = refresh_interval_;
+    while (next_refresh_ <= horizon) {
+      const cycle_t end = next_refresh_ + refresh_cycles_;
+      if (end > now) dram_.request(-1, cmax(next_refresh_, now), end - cmax(next_refresh_, now), [](cycle_t) {});
+      next_refresh_ += refresh_interval_;
+    }
+  }
+  dram_.request(0, earliest, dram_cycles_per_line_, std::move(done));
+}
+
 void memory_system_t::fetch(uint64_t line, cycle_t t) {
   trace_ev_addr("l2fill", t, (unsigned long long)line * line_bytes_);
   if (dram_max_reads_ && dram_reads_ >= dram_max_reads_) { dram_waiting_.push_back({line, t}); return; }
@@ -256,9 +272,8 @@ void memory_system_t::fetch(uint64_t line, cycle_t t) {
 
 void memory_system_t::start_fetch(uint64_t line, cycle_t t) {
   dram_reads_++;
-  dram_.request(0, t, dram_cycles_per_line_, [this, line, t](cycle_t d) {
+  dram_request(t, [this, line, t](cycle_t d) {
     const cycle_t r = dram_ready(line, d);
-    if (getenv("GPERF_DBG_FILL")) fprintf(stderr, "FILLLAT %lld %lld\n", (long long)t, (long long)r);
     eq_.at(r, [this, r] {   // the read's slot frees when its data is back
       dram_reads_--;
       if (!dram_waiting_.empty()) {
@@ -281,13 +296,15 @@ void memory_system_t::start_fetch(uint64_t line, cycle_t t) {
   });
 }
 
-void memory_system_t::read(uint64_t addr, done_t back, const char *who, bool own_client, done_t granted) {
+void memory_system_t::read(uint64_t addr, done_t back, const char *who, bool own_client, done_t granted,
+                           cycle_t hit_lat, bool partial) {
   const uint64_t line = addr / line_bytes_;
-  (own_client ? client_bus_ : bus_).request(0, eq_.now(), 1, [this, line, back, who, granted, own_client](cycle_t g) {
+  (own_client ? client_bus_ : bus_).request(0, eq_.now(), 1,
+                                            [this, line, back, who, granted, own_client, hit_lat, partial](cycle_t g) {
     trace_ev(who, g);
     if (granted) granted(g);
-    const cycle_t lat = own_client ? client_hit_lat_ : hit_lat_;
-    probe(line, g, false, [this, line, back, lat](cycle_t t) { lookup(line, t, back, lat); });
+    const cycle_t lat = hit_lat >= 0 ? hit_lat : own_client ? client_hit_lat_ : hit_lat_;
+    probe(line, g, false, [this, line, back, lat, partial](cycle_t t) { lookup(line, t, back, lat, partial); });
   });
 }
 

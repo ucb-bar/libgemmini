@@ -46,6 +46,7 @@ private:
   std::unordered_map<uint64_t, done_t> jobs_;
   std::unordered_map<uint64_t, uint32_t> job_left_;   // ooo_free: Gets of the job not yet written
   bool ooo_;
+  cycle_t free_lat_;
   uint32_t in_flight_ = 0;
   cycle_t next_issue_ = 0;
   bool issue_pending_ = false, merging_ = false;

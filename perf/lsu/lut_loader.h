@@ -15,7 +15,7 @@ namespace gperf {
 class lut_loader_t {
 public:
   lut_loader_t(const config_t &c, event_queue_t &eq, memory_system_t &mem)
-      : eq_(eq), mem_(mem), fixed_((cycle_t)c.lut_fixed_cycles) {}
+      : eq_(eq), mem_(mem), fixed_((cycle_t)c.lut_fixed_cycles), hit_((cycle_t)c.lut_hit_latency) {}
 
   bool busy() const { return busy_; }
   cycle_t last_done() const { return last_done_; }
@@ -36,12 +36,12 @@ private:
     }
     mem_.read(addr, [this, addr, words_left, done](cycle_t t) {
       eq_.at(t + 1, [this, addr, words_left, done] { next(addr + 8, words_left - 1, done); });
-    }, "lget", true);
+    }, "lget", true, nullptr, hit_, true);
   }
 
   event_queue_t &eq_;
   memory_system_t &mem_;
-  cycle_t fixed_;
+  cycle_t fixed_, hit_;
   bool busy_ = false;
   cycle_t last_done_ = 0;
 };

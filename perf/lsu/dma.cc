@@ -8,7 +8,8 @@ dma_reader_t::dma_reader_t(const config_t &c, event_queue_t &eq, memory_system_t
     : eq_(eq), mem_(mem), sp_(sp), get_bytes_((uint32_t)c.dma_get_bytes),
       max_in_flight_((uint32_t)c.dma_max_in_flight),
       row_bytes_per_cycle_((uint32_t)c.dma_spad_write_bytes_per_cycle),
-      interval_((cycle_t)std::ceil(1.0 / c.dma_gets_per_cycle)), ooo_(c.dma_ooo_free != 0) {}
+      interval_((cycle_t)std::ceil(1.0 / c.dma_gets_per_cycle)), ooo_(c.dma_ooo_free != 0),
+      free_lat_((cycle_t)c.dma_free_latency) {}
 
 void dma_reader_t::submit(uint64_t addr, uint32_t rows, uint32_t row_bytes, uint64_t stride, uint32_t spad_row,
                           done_t done) {
@@ -68,8 +69,10 @@ void dma_reader_t::pack(uint64_t seq) {
   const get_t &g = issued_[(size_t)(seq - base_seq_)];
   const cycle_t cycles = (g.useful + row_bytes_per_cycle_ - 1) / row_bytes_per_cycle_;
   const uint64_t job = g.job;
-  sp_.write_port(g.spad_row).request(SP_MVIN, eq_.now(), cycles, [this, job, seq](cycle_t t) {
-    in_flight_--;
+  // the tracker slot frees free_lat_ after the response (the next Get leaves then), the row is written meanwhile
+  const cycle_t back = eq_.now();
+  eq_.at(back + (free_lat_ > 1 ? free_lat_ - 1 : 0), [this] { in_flight_--; try_issue(); });
+  sp_.write_port(g.spad_row).request(SP_MVIN, back, cycles, [this, job, seq](cycle_t t) {
     issued_[(size_t)(seq - base_seq_)].packed = true;
     while (!issued_.empty() && issued_.front().packed) { issued_.pop_front(); base_seq_++; }
     if (--job_left_[job] == 0) {

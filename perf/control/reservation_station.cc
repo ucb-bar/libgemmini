@@ -29,6 +29,7 @@ uint64_t reservation_station_t::alloc(rs_cmd_t c) {
         dep = dep || (e.c.read_banks & o.c.read_banks) || (e.c.vec == 2 && o.c.vec == 2);
       if (e.c.q == Q_VEC && e.c.vec == 2 && q == Q_ST && o.c.sr_ordered_store) dep = true;
       if ((e.c.sr_ordered_store || e.c.scale_cfg_act0) && q == Q_VEC && o.c.vec == 2) dep = true;
+      if (scale_cfg_waits_loads_ && e.c.scale_cfg && q == Q_LD && !o.c.config) dep = true;   // old RTL
       if (dep) { e.deps++; o.dependents.push_back(id); }
     }
   }

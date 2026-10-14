@@ -36,7 +36,8 @@ struct rs_cmd_t {
   // A store other than a BF16 scratchpad store (StCSpad rs2[63]): raw mvouts, DRAM loop stores, quantized spad
   // stores. It and SPAD_REQUANT are ordered both ways (requantizer / scale coalescer, ReservationStation.scala:503-520)
   bool sr_ordered_store = false;
-  bool scale_cfg_act0 = false;               // CONFIG_SCALE_MEM that may read act half 0: after an older SPAD_REQUANT
+  bool scale_cfg_act0 = false;
+  bool scale_cfg = false;                    // a CONFIG_SCALE_MEM (raw or loop-managed)               // CONFIG_SCALE_MEM that may read act half 0: after an older SPAD_REQUANT
   bool fp4_sr = false;                       // an FP4 SPAD_REQUANT (rs2[32]): owns the requantizer alone
   const char *what = "";
 };
@@ -62,6 +63,7 @@ public:
   // An FP4 SPAD_REQUANT is the next thing for its unit: ready, not issued, its banks free (vec_sr_fp4_waiting,
   // ReservationStation.scala, commit d3e6df6). The accumulator side then sends no new beats (Controller sr_fp4_hold).
   bool fp4_sr_waiting() const;
+  void set_scale_cfg_waits_loads(bool v) { scale_cfg_waits_loads_ = v; }
   bool idle() const { return ents_.empty(); }
   std::string describe() const;   // live entries per queue, for diagnostics
   cycle_t last_complete() const { return last_complete_; }
@@ -87,6 +89,7 @@ private:
   cycle_t last_complete_ = 0;
   std::function<void()> room_cb_;
   std::function<uint32_t()> vec_pending_;
+  bool scale_cfg_waits_loads_ = false;
   std::function<void(int)> done_cb_;
   std::function<void(const rs_cmd_t &, cycle_t, cycle_t, cycle_t)> trace_cb_;
 };

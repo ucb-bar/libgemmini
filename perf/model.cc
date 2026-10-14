@@ -21,6 +21,7 @@ model_t::model_t(const config_t &c)
   rs_.on_done([this](int tag) { loops_.completed(tag); kick_at(eq_.now()); });
   scales_.on_room([this] { kick_at(eq_.now()); });
   if (c.rs_vec_pending_gate) rs_.on_vec_pending([this] { return store_.pending_banks(); });
+  rs_.set_scale_cfg_waits_loads(c.rs_scale_cfg_waits_loads != 0);
   store_.on_acc_hold([this] { return rs_.fp4_sr_waiting() || sreq_.fp4_active(); });
   sreq_.on_done([this] { store_.process(); });
   if (c.mem_host_tracking >= 2 && c.host_icache && c.host_core_model) core_.reset(new host_core_t(c));
@@ -224,7 +225,8 @@ bool model_t::issue_loop(const loop_cmd_t &c) {
       r.config = true;
       r.tag = LC_EX;
       r.what = "loop_scale_cfg";
-      r.scale_cfg_act0 = c.half == 0;   // managed config of act half 1 skips the SR order (:492)
+      r.scale_cfg_act0 = c.half == 0;
+      r.scale_cfg = true;   // managed config of act half 1 skips the SR order (:492)
       r.unit_has_room = [this] { return exec_.has_room(); };
       const int h = c.half;
       const bool reuse = c.a_reuse;
@@ -297,6 +299,7 @@ bool model_t::issue_raw(const rocc_cmd_t &cmd) {
     // a CONFIG_SCALE_MEM that bypassed the loops counts in their ex utilization until it completes (:1440-1446)
     if (passing_ && f == 26) r.tag = LC_EX;
     if (f == 3) r.sr_ordered_store = true;   // raw mvout
+    if (f == 26) r.scale_cfg = true;
     if (f == 26) r.scale_cfg_act0 = !(((rs2 >> 17) & 1) && ((rs1 >> 60) & 1) && !((rs1 >> 63) & 1));
     r.q = q;
     r.a = a;

@@ -12,6 +12,15 @@ config_t preset_mx_rocket() {
   return c;
 }
 
+// MxE3M2PerfGemminiRocketConfig (FP6 E3M2 LUT, standalone MX, current RTL; GemminiConfigs.scala:148-156)
+config_t preset_e3m2_lut() {
+  config_t c;
+  c.preset = "e3m2_lut";
+  c.rs_packed_preload_align = 1;
+  c.rs_scale_cfg_waits_loads = 0;
+  return c;
+}
+
 config_t preset_e4m3_vpu() {
   config_t c;
   c.preset = "e4m3_vpu";
@@ -19,6 +28,7 @@ config_t preset_e4m3_vpu() {
   c.vpu_units = 2;        // :520-522
   c.frontend_depth = 8;   // no LoopConv stage (Controller.scala:1115-1124)
   c.rs_packed_preload_align = 1;   // VPU-config RTL is after b0dd6cb
+  c.rs_scale_cfg_waits_loads = 0;  // ... and after 42c9871
   return c;
 }
 
@@ -32,6 +42,9 @@ config_t preset_firesim() {
   c.mem_bus_bytes = 32;
   c.mem_dram_latency = 30;
   c.mem_dram_max_reads = 16;
+  // FASED: calibrated on the fixed pipe (13.9), no refresh stalls measured there
+  c.mem_dram_model = 0;
+  c.mem_dram_refresh_interval = 0;
   return c;
 }
 
@@ -56,7 +69,8 @@ config_t config_t::from_env() {
   if (!p || !*p || !strcmp(p, "mx_rocket")) c = preset_mx_rocket();
   else if (!strcmp(p, "e4m3_vpu")) c = preset_e4m3_vpu();
   else if (!strcmp(p, "firesim")) c = preset_firesim();
-  else { fprintf(stderr, "gemmini perf: unknown GEMMINI_PERF_CONFIG=%s (mx_rocket|e4m3_vpu|firesim)\n", p); abort(); }
+  else if (!strcmp(p, "e3m2_lut")) c = preset_e3m2_lut();
+  else { fprintf(stderr, "gemmini perf: unknown GEMMINI_PERF_CONFIG=%s (mx_rocket|e4m3_vpu|firesim|e3m2_lut)\n", p); abort(); }
 
   if (const char *s = getenv("GEMMINI_PERF_SET")) {
     std::string all(s);

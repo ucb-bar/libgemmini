@@ -31,8 +31,9 @@ public:
   // A Get issued now. who: trace tag; own_client: the MX scale / LUT loaders' own TileLink client, which does not
   // share the DMA's crossbar port (measured: their Gets never appear on it), only the L2 and DRAM.
   // granted(g), if given: the bus accepted the request at g (a TileLink client holds a request until then).
+  // hit_lat >= 0 overrides the hit latency; partial: a sub-line Get, served from the fill's first beat on a miss.
   void read(uint64_t addr, done_t data_back, const char *who = "get", bool own_client = false,
-            done_t granted = nullptr);
+            done_t granted = nullptr, cycle_t hit_lat = -1, bool partial = false);
   void write(uint64_t addr, uint32_t bytes, done_t acked, done_t granted = nullptr);   // a Put issued now
 
   // The CPU stored to (write) or loaded from [addr, addr+bytes): those lines are now in its L1 (and present in the
@@ -62,7 +63,7 @@ private:
     std::vector<done_t> waiters;                          // requests waiting on the fill: resumed at its landing
     cycle_t put_free = 0;                                 // the next Put to this line may start here
   };
-  void lookup(uint64_t line, cycle_t t, done_t back, cycle_t hit_lat);
+  void lookup(uint64_t line, cycle_t t, done_t back, cycle_t hit_lat, bool partial = false);
   void insert(uint64_t line, cycle_t ready, bool dirty = false);
   void fetch(uint64_t line, cycle_t t);   // the L2 fills `line` from DRAM; its waiters resume when it lands
   // A Put's turn on its line: not before `earliest` nor the line's previous Put; acked `post` cycles later.
@@ -80,9 +81,13 @@ private:
   port_t bus_, client_bus_, dram_, l1_probe_;
   uint32_t line_bytes_;
   size_t capacity_lines_;
-  cycle_t miss_detect_ = 0, fill_to_data_ = 0;
+  cycle_t miss_detect_ = 0, fill_to_data_ = 0, partial_fill_to_data_ = 0;
   cycle_t hit_lat_, client_hit_lat_, dram_lat_, ack_lat_, full_ack_lat_, put_beats_, dram_cycles_per_line_,
       put_serial_, fill_secondary_first_, fill_secondary_next_;
+  cycle_t refresh_interval_, refresh_cycles_, next_refresh_ = 0;
+  // A DRAM line slot from `earliest`; refresh windows up to there (and a little beyond, where queued slots land) are
+  // claimed first, at a better priority, so the slots wait them out.
+  void dram_request(cycle_t earliest, done_t done);
   std::list<uint64_t> lru_;   // front = most recent (fully associative mode, mem.l2_ways = 0)
   // set-associative mode: the lines of each set; a full set evicts a pseudo-random way (as the RTL's LFSR)
   uint32_t l2_ways_ = 0, l2_sets_n_ = 1;

@@ -42,7 +42,7 @@ private:
   uint32_t dim_;
   size_t queue_len_;
   uint32_t max_running_;
-  cycle_t lag_;
+  cycle_t lag_, start_lat_;
   uint64_t stride_[3] = {0, 0, 0};
   uint32_t block_stride_[3] = {0, 0, 0};
   std::deque<job_t> waiting_;

@@ -120,16 +120,19 @@ void store_unit_t::process() {
                 [part](cycle_t t) { part(t); }, (uint32_t)slack_);
   } else {
     const uint32_t b0 = sp_.bank_of(c.dst.row()), b1 = sp_.bank_of(c.dst.row() + (uint32_t)(beats ? beats - 1 : 0));
-    // the banks count as pending once the first rows reach write_norm_q (Scratchpad.scala st_in), pend_delay_ later
+    // the banks count as pending once the first rows reach write_norm_q (Scratchpad.scala st_in), pend_delay_ later.
+    // pend_ is the RTL's pending register: claims and releases commit at the end of their cycle, so a vector issue
+    // in that cycle sees the previous cycle's set (a release and the next store's claim in one cycle leave no gap).
     auto claim = [this, b0, b1] { for (uint32_t b = b0; b <= b1 && b < 32; b++) pend_[b]++; };
-    if (pend_delay_ > 0) eq_.at(now + pend_delay_, claim);
-    else claim();
+    eq_.commit(now + pend_delay_, claim);
     auto released = std::make_shared<bool>(false);
     auto release = [this, b0, b1, released] {
       if (*released) return;
       *released = true;
-      for (uint32_t b = b0; b <= b1 && b < 32; b++) pend_[b]--;
-      rs_.kick(Q_VEC);   // a vector entry may have been waiting on these banks
+      eq_.commit([this, b0, b1] {
+        for (uint32_t b = b0; b <= b1 && b < 32; b++) pend_[b]--;
+        rs_.kick(Q_VEC);   // a vector entry may have been waiting on these banks: it tries next cycle
+      });
     };
     port_t &wr = sp_.write_port(c.dst.row());
     const cycle_t lead = spad_lead_, tail = pend_tail_;
@@ -142,7 +145,7 @@ void store_unit_t::process() {
       wr.request(SP_REQUANT, data_from, beats - lead, [this, part, release, tail](cycle_t t) {
         last_write_ = cmax(last_write_, t);
         part(t);
-        eq_.at(t + tail, release);
+        eq_.commit(t + tail, release);
       });
       wr.request(SP_REQUANT, data_from, lead, [this](cycle_t t) { last_write_ = cmax(last_write_, t); });
     } else {
