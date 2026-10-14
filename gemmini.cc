@@ -96,6 +96,8 @@ void gemmini_state_t::reset()
   mx_smem.clear(); mx_smem.resize(sp_matrices * DIM * 16, 0);
   mx_acc.assign((size_t)MX_ACC_ROWS * 64, 0);
   mx_ex_acc_base = mx_st_acc_base = 0;
+  mx_scale_q.clear();
+  for (int x = 0; x < 4; x++) mx_scale_half[x] = 0;
   mx_lut_a.clear(); mx_lut_a.resize(2048 * 16, 0);
   mx_lut_b.clear(); mx_lut_b.resize(2048 * 16, 0);
   mx_lut_c.clear(); mx_lut_c.resize(2048 * 16, 0);
@@ -121,6 +123,18 @@ void gemmini_t::set_host(std::unique_ptr<gemmini_host_t> host) {
   host_ = std::move(host);
   size_t rows = 0;
   if (uint8_t *mem = host_->shared_scratchpad(&rows)) gemmini_state.spad.attach((elem_t *)mem, rows);
+}
+
+void gemmini_t::debug_dump(const char *prefix) const {
+  auto put = [&](const char *ext, const void *p, size_t n) {
+    std::string path = std::string(prefix) + ext;
+    if (FILE *f = fopen(path.c_str(), "wb")) { fwrite(p, 1, n, f); fclose(f); }
+  };
+  put(".acc", gemmini_state.mx_acc.data(), gemmini_state.mx_acc.size() * 2);
+  put(".sca", gemmini_state.mx_scale_a_mem.data(), gemmini_state.mx_scale_a_mem.size());
+  put(".scb", gemmini_state.mx_scale_b_mem.data(), gemmini_state.mx_scale_b_mem.size());
+  const uint32_t cur[2] = {gemmini_state.mx_ex_acc_base, gemmini_state.mx_st_acc_base};
+  put(".cur", cur, sizeof cur);
 }
 
 reg_t gemmini_t::execute(unsigned funct, reg_t rs1, reg_t rs2) {
@@ -1168,6 +1182,18 @@ void gemmini_t::mxquant_config_mvout(reg_t rs1, reg_t rs2) {
   // instruction -- sees the identical bit. gemmini_mxquant_config_mvout_resident() sets it.
   gemmini_state.mx_loop_scale_resident = ((rs1 >> 63) & 0x1) != 0;   // MX_SCALE_RESIDENT (bit63, decoupled from bit62 counter_reset)
   gemmini_state.mx_lut_update_granularity = rs2 & 0xFFFF;
+  // the scale halves (scale_loader_t::config): a managed config (rs2[17]) takes the halves it selects (INUSE); any
+  // config frees an INUSE half it does not select, which may start a waiting gated load
+  const bool managed = (rs2 >> 17) & 1;
+  for (int x = 0; x < 4; x++) {
+    const int sel_half = x < 2 ? gemmini_state.mx_scale_act_sel : gemmini_state.mx_scale_wgt_sel;
+    if (sel_half == x % 2) {
+      if (managed) gemmini_state.mx_scale_half[x] = 2;
+    } else if (gemmini_state.mx_scale_half[x] == 2) {
+      gemmini_state.mx_scale_half[x] = 0;
+    }
+  }
+  mx_scale_drain();
 }
 
 // VPU_EXEC (MxE4M3VpuGemminiRocketConfig): rs1 = src1[13:0] | src2[27:14] | dst[41:28] | rows[57:42],
@@ -1285,7 +1311,30 @@ void gemmini_t::spad_requant(reg_t rs1, reg_t rs2) {
     }
 }
 
+// MX_LOAD_SCALES as the RTL loader runs them (the scale start_q, Controller.scala:542-721; perf/lsu/scale_loader.h):
+// in order, and a gated load (rs2[54], loop-managed protocol) starts only once its half (sel rs2[32], dest[12] =
+// rs2[45]) is FREE -- its last user's computes done -- holding back every load behind it. Functionally those
+// computes ran when they were issued, so a half frees when a CONFIG_SCALE_MEM selects the other one
+// (mxquant_config_mvout). Without gated loads every load starts at once, as before.
 void gemmini_t::mx_load_scales(reg_t rs1, reg_t rs2) {
+  gemmini_state.mx_scale_q.push_back({rs1, rs2});
+  mx_scale_drain();
+}
+
+void gemmini_t::mx_scale_drain() {
+  auto &q = gemmini_state.mx_scale_q;
+  while (!q.empty()) {
+    const reg_t rs1 = q.front().first, rs2 = q.front().second;
+    const int x = (int)(((rs2 >> 32) & 1) * 2 + ((rs2 >> 45) & 1));
+    const bool gated = (rs2 >> 54) & 1;
+    if (gated && gemmini_state.mx_scale_half[x] != 0) return;
+    q.pop_front();
+    if (gated) gemmini_state.mx_scale_half[x] = 1;   // LOADED
+    mx_load_scales_now(rs1, rs2);
+  }
+}
+
+void gemmini_t::mx_load_scales_now(reg_t rs1, reg_t rs2) {
   // rs1[39:0] addr, rs1[63:40] DRAM row pitch; rs2[31:0] bytes/row (1-D: total), [32] sel, [45:33] dest byte
   // offset, [53:46] rows (0 = 1). Rows land contiguously from dest, matching the RTL loader.
   const reg_t dram_addr = rs1 & 0xFFFFFFFFFFULL;
@@ -1404,7 +1453,7 @@ void gemmini_t::mx_loop_ws_dram(reg_t rs1, reg_t rs2) {
                      gemmini_state.mx_asc_stride[slot] == gemmini_state.loop_ws_A_sc_stride &&
                      gemmini_state.mx_asc_I[slot] == I && gemmini_state.mx_asc_K[slot] == K;
     if (!hit) {
-      mx_load_scales((gemmini_state.loop_ws_A_sc & 0xFFFFFFFFFFULL) | (gemmini_state.loop_ws_A_sc_stride << 40),
+      mx_load_scales_now((gemmini_state.loop_ws_A_sc & 0xFFFFFFFFFFULL) | (gemmini_state.loop_ws_A_sc_stride << 40),
                      (rows << 46) | (dest << 33) | ((reg_t)I * TW));
       gemmini_state.mx_asc_valid[slot] = true;
       gemmini_state.mx_asc_addr[slot] = gemmini_state.loop_ws_A_sc;
@@ -1412,7 +1461,7 @@ void gemmini_t::mx_loop_ws_dram(reg_t rs1, reg_t rs2) {
       gemmini_state.mx_asc_I[slot] = I;
       gemmini_state.mx_asc_K[slot] = K;
     }
-    mx_load_scales((gemmini_state.loop_ws_B_sc & 0xFFFFFFFFFFULL) | (gemmini_state.loop_ws_B_sc_stride << 40),
+    mx_load_scales_now((gemmini_state.loop_ws_B_sc & 0xFFFFFFFFFFULL) | (gemmini_state.loop_ws_B_sc_stride << 40),
                    (rows << 46) | (dest << 33) | (1ULL << 32) | ((reg_t)J * TW));
     // the loop's own CONFIG_SCALE_MEM: rs1 = {0,0, slot, slot, K, J, I, 0}, rs2 = managed | granularity 1
     gemmini_state.mx_scale_dram = 0;

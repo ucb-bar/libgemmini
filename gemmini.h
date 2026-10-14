@@ -10,6 +10,7 @@
 typedef uint64_t reg_t;
 struct rocc_insn_t { unsigned opcode = 0, rd = 0, xs2 = 0, xs1 = 0, xd = 0, rs1 = 0, rs2 = 0, funct = 0; };
 #endif
+#include <deque>
 #include <memory>
 #include <random>
 #include <limits>
@@ -168,6 +169,10 @@ struct gemmini_state_t
   // output block (tile t of 4 at columns 16t). LoopMatmul's compute and store cursors (0 / MX_ACC_ROWS/2) move
   // independently: the compute one when a loop's computes issue, the store one when its stores do.
   std::vector<uint16_t> mx_acc;
+  // MX_LOAD_SCALES waiting in the loader's queue, and each scale half's state (x = sel*2 + half: 0 FREE,
+  // 1 LOADED, 2 INUSE) -- a gated load (rs2[54]) starts only on a FREE half, and the loads behind it wait
+  std::deque<std::pair<reg_t, reg_t>> mx_scale_q;
+  uint8_t mx_scale_half[4];
   uint32_t mx_ex_acc_base, mx_st_acc_base;
 
   // FP6 LUTs: per-row 16 × 6-bit FP6 E3M2 codes (one byte each, low 6 bits).
@@ -196,6 +201,8 @@ public:
   // Another host (gemmini_host.h): its memory, and -- radiance -- its shared memory as the scratchpad. Then
   // execute() runs one command's functional work (the host owns timing).
   void set_host(std::unique_ptr<gemmini_host_t> host);
+  // Debugging: the MX accumulator, both scale memories and the accumulator cursors, to <prefix>.{acc,sca,scb,cur}
+  void debug_dump(const char *prefix) const;
   reg_t execute(unsigned funct, reg_t rs1, reg_t rs2);
 
   void mvin(reg_t dram_addr, reg_t sp_addr, int state_id);
@@ -218,6 +225,8 @@ public:
   void loop_ws_config_spad_C(reg_t rs1, reg_t rs2);
   void mxquant_config_mvout(reg_t rs1, reg_t rs2);
   void mx_load_scales(reg_t rs1, reg_t rs2);
+  void mx_load_scales_now(reg_t rs1, reg_t rs2);
+  void mx_scale_drain();
   void vpu_exec(reg_t rs1, reg_t rs2);
   void spad_requant(reg_t rs1, reg_t rs2);
   void mx_read_smem(reg_t rs1, reg_t rs2);

@@ -112,6 +112,8 @@ int gemmini_radiance_write(gemmini_radiance_t *g, uint64_t cycle, uint32_t offse
     char path[512];
     snprintf(path, sizeof path, "%s/cmd%05llu_f%u.bin", g->snap, (unsigned long long)g->commands, funct);
     if (FILE *f = fopen(path, "wb")) { fwrite(g->smem, 1, g->smem_bytes, f); fclose(f); }
+    snprintf(path, sizeof path, "%s/cmd%05llu_f%u", g->snap, (unsigned long long)g->commands, funct);
+    g->func->debug_dump(path);
   }
   return 1;
 }
