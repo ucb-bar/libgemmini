@@ -71,6 +71,12 @@ config_t preset_radiance() {
   c.scale_get_bytes = 32;           // the scale loader's Gets are at most a line
   c.rs_packed_preload_align = 1;    // b0dd6cb is in the simv
   c.rs_scale_cfg_waits_loads = 0;   // 42c9871 is in the simv
+  // [measured] fa_mxfp8_sr FSDB (RadianceE4M3MxGemminiSingleClusterTraceConfig, 2026-10-07):
+  c.st_spad_read_interval = 1;      // acc -> spad stores read 1 acc row per cycle (acc_mems_0 read_req ready every
+                                    //   cycle); 520 of 776 stores issue 19 cycles after the previous
+  c.mem_dram_bytes_per_cycle = 6.4; // 5 cycles per 32 B line: DMA Gets to a line's first touch, 32 in flight,
+                                    //   mean 159 (model 158; at 8 B/cycle 126)
+  c.mem_l2_hit_latency = 8;         // repeat-line Gets: min / p10 8 cycles (auto_spad_id_out A -> D)
   return c;
 }
 

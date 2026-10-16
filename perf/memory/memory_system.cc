@@ -301,10 +301,15 @@ void memory_system_t::read(uint64_t addr, done_t back, const char *who, bool own
   const uint64_t line = addr / line_bytes_;
   (own_client ? client_bus_ : bus_).request(0, eq_.now(), 1,
                                             [this, line, back, who, granted, own_client, hit_lat, partial](cycle_t g) {
-    trace_ev(who, g);
+    trace_ev_addr(who, g, (unsigned long long)line * line_bytes_);
     if (granted) granted(g);
     const cycle_t lat = hit_lat >= 0 ? hit_lat : own_client ? client_hit_lat_ : hit_lat_;
-    probe(line, g, false, [this, line, back, lat, partial](cycle_t t) { lookup(line, t, back, lat, partial); });
+    // trace: the data back to the requester (ev,data / ev,cdata for the loaders' own client), per Get
+    done_t traced = trace_file() ? done_t([this, line, back, own_client](cycle_t r) {
+      trace_ev_addr(own_client ? "cdata" : "data", r, (unsigned long long)line * line_bytes_);
+      back(r);
+    }) : back;
+    probe(line, g, false, [this, line, traced, lat, partial](cycle_t t) { lookup(line, t, traced, lat, partial); });
   });
 }
 

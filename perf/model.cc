@@ -21,7 +21,10 @@ model_t::model_t(const config_t &c)
   rs_.on_done([this](int tag) { loops_.completed(tag); kick_at(eq_.now()); });
   rs_.on_loop_done([this](int64_t loop) {
     auto it = loop_out_.find((uint64_t)loop);
-    if (it != loop_out_.end() && --it->second == 0) loop_out_.erase(it);
+    if (it != loop_out_.end() && --it->second == 0) {
+      loop_out_.erase(it);
+      trace_ev_addr("loopdone", eq_.now(), (unsigned long long)loop);   // its last RS entry finished
+    }
   });
   scales_.on_room([this] { kick_at(eq_.now()); });
   if (c.rs_vec_pending_gate) rs_.on_vec_pending([this] { return store_.pending_banks(); });
