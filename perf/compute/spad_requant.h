@@ -24,9 +24,10 @@ public:
         fixed_((cycle_t)c.sreq_fixed_cycles) {}
 
   struct cmd_t { uint32_t src, dst, M, N; bool tiled, resident, fp4; };
-  static cmd_t decode(uint64_t rs1, uint64_t rs2) {
-    return {(uint32_t)(rs1 & 0x3FFF), (uint32_t)((rs1 >> 14) & 0x3FFF), (uint32_t)(rs2 & 0xFFFF),
-            (uint32_t)((rs2 >> 16) & 0xFFFF), (bool)((rs1 >> 28) & 1), (bool)((rs1 >> 29) & 1),
+  static cmd_t decode(uint64_t rs1, uint64_t rs2, unsigned f) {   // f: row-address field width (ra_field_bits)
+    const uint64_t m = (1ULL << f) - 1;
+    return {(uint32_t)(rs1 & m), (uint32_t)((rs1 >> f) & m), (uint32_t)(rs2 & 0xFFFF),
+            (uint32_t)((rs2 >> 16) & 0xFFFF), (bool)((rs1 >> (2 * f)) & 1), (bool)((rs1 >> (2 * f + 1)) & 1),
             (bool)((rs2 >> 32) & 1)};
   }
   // exact footprints as the RS computes them (LoopMatmul.scala vec_bypass): BF16 source M*N/8 rows, E4M3

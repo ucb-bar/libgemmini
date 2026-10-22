@@ -11,8 +11,8 @@
 #define DIM GEMMINI_DIM
 #define ADDR_LEN 32
 #define BANK_NUM 4
-#if GEMMINI_DIM == 8
-// DIM=8 test-side BANK_ROWS = 65536/DIM = 8192, so b_base = BANK_NUM*BANK_ROWS = 32768 -- the model
+#if GEMMINI_DIM <= 8
+// DIM=8 (and DIM=4: 128 KB of 4-B rows) test-side BANK_ROWS = 65536/DIM = 8192, so b_base = BANK_NUM*BANK_ROWS = 32768 -- the model
 // scratchpad (sized BANK_NUM*BANK_ROWS/DIM matrices) must be at least that big.
 #define BANK_ROWS 8192
 #else
@@ -20,12 +20,22 @@
 #endif
 #define ACC_ROWS 1024
 #define MAX_BYTES 64
+#ifdef GEMMINI_E4M3_NATIVE_QUAD
+// native E4M3 quad (MxDim32E4M3Quad): one spad element = one 16-bit lane = two E4M3 codes (64-B rows)
+#define MAX_BLOCK_LEN (MAX_BYTES/(DIM*2))
+#define MAX_BLOCK_LEN_ACC (MAX_BYTES/(DIM*4))
+
+typedef int16_t elem_t;
+static const elem_t elem_t_max = 32767;
+static const elem_t elem_t_min = -32768;
+#else
 #define MAX_BLOCK_LEN (MAX_BYTES/(DIM*1))
 #define MAX_BLOCK_LEN_ACC (MAX_BYTES/(DIM*4))
 
 typedef int8_t elem_t;
 static const elem_t elem_t_max = 127;
 static const elem_t elem_t_min = -128;
+#endif
 typedef int32_t acc_t;
 typedef int64_t full_t;
 
@@ -78,7 +88,7 @@ typedef uint32_t acc_scale_t_bits;
     ({float y = ROUND_NEAR_EVEN((x) * (scale)); y > INT8_MAX ? INT8_MAX : (y < INT8_MIN ? INT8_MIN : (acc_t)y);})
 
 #define MVIN_SCALE(x, scale) \
-    ({float y = ROUND_NEAR_EVEN((x) * (scale)); y > INT8_MAX ? INT8_MAX : (y < INT8_MIN ? INT8_MIN : (elem_t)y);})
+    ({float y = ROUND_NEAR_EVEN((x) * (scale)); y > elem_t_max ? elem_t_max : (y < elem_t_min ? elem_t_min : (elem_t)y);})
 
 #define MVIN_SCALE_ACC(x, scale) (x)
 

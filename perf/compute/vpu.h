@@ -24,7 +24,7 @@ public:
   vpu_t(const config_t &c, event_queue_t &eq, scratchpad_t &sp, reservation_station_t &rs);
 
   struct cmd_t { uint32_t src1, src2, dst, dst2, rows, rlen; int op; bool bcast; };
-  static cmd_t decode(uint64_t rs1, uint64_t rs2);
+  static cmd_t decode(uint64_t rs1, uint64_t rs2, unsigned f);   // f: row-address field width (ra_field_bits)
   static bool uses_src2(int op);
   static uint32_t dst_rows(const cmd_t &c);
   static uint32_t src2_rows(const cmd_t &c);

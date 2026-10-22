@@ -141,7 +141,7 @@ bool model_t::may_pass(const rocc_cmd_t &c) const {
   const unsigned f = c.funct;
   if (f == 33) {
     if (!rs_.has_room(Q_VEC)) return false;
-    const vpu_t::cmd_t v = vpu_t::decode(c.rs1, c.rs2);
+    const vpu_t::cmd_t v = vpu_t::decode(c.rs1, c.rs2, ra_field_bits(cfg_));
     span_t s[4] = {make_span(local_addr_t{v.src1}, v.rows, false), make_span(local_addr_t{v.dst}, vpu_t::dst_rows(v), true),
                    vpu_t::uses_src2(v.op) ? make_span(local_addr_t{v.src2}, vpu_t::src2_rows(v), false) : span_t{},
                    v.op == 13 ? make_span(local_addr_t{v.dst2}, vpu_t::groups(v), true) : span_t{}};
@@ -150,7 +150,7 @@ bool model_t::may_pass(const rocc_cmd_t &c) const {
   }
   if (f == 34) {
     if (!rs_.has_room(Q_VEC) || out_bytes_ != 2.0) return false;
-    const spad_requant_t::cmd_t s = spad_requant_t::decode(c.rs1, c.rs2);
+    const spad_requant_t::cmd_t s = spad_requant_t::decode(c.rs1, c.rs2, ra_field_bits(cfg_));
     if (loops_.rows_hit(sreq_.read_span(s)) || loops_.rows_hit(sreq_.write_span(s))) return false;
     return !(s.resident && loops_.resident_sr_blocked());
   }
@@ -408,7 +408,7 @@ bool model_t::issue_raw(const rocc_cmd_t &cmd) {
       return true;
     case 33: {  // VPU_EXEC: src1 / src2 read, dst / dst2 written (exact footprints, ReservationStation.scala)
       if (!rs_.has_room(Q_VEC)) return false;
-      const vpu_t::cmd_t v = vpu_t::decode(rs1, rs2);
+      const vpu_t::cmd_t v = vpu_t::decode(rs1, rs2, ra_field_bits(cfg_));
       rs_cmd_t r;
       r.q = Q_VEC;
       r.vec = 1;
@@ -426,7 +426,7 @@ bool model_t::issue_raw(const rocc_cmd_t &cmd) {
     }
     case 34: {  // SPAD_REQUANT
       if (!rs_.has_room(Q_VEC)) return false;
-      const spad_requant_t::cmd_t s = spad_requant_t::decode(rs1, rs2);
+      const spad_requant_t::cmd_t s = spad_requant_t::decode(rs1, rs2, ra_field_bits(cfg_));
       rs_cmd_t r;
       r.q = Q_VEC;
       r.vec = 2;

@@ -13,17 +13,18 @@ vpu_t::vpu_t(const config_t &c, event_queue_t &eq, scratchpad_t &sp, reservation
     : eq_(eq), sp_(sp), rs_(rs), latency_((cycle_t)c.vpu_latency),
       busy_((size_t)(c.vpu_units > 0 ? c.vpu_units : 1)) {}
 
-vpu_t::cmd_t vpu_t::decode(uint64_t rs1, uint64_t rs2) {
+vpu_t::cmd_t vpu_t::decode(uint64_t rs1, uint64_t rs2, unsigned f) {
+  const uint64_t m = (1ULL << f) - 1;
   cmd_t c;
-  c.src1 = rs1 & 0x3FFF;
-  c.src2 = (rs1 >> 14) & 0x3FFF;
-  c.dst = (rs1 >> 28) & 0x3FFF;
-  c.rows = (rs1 >> 42) & 0xFFFF;
+  c.src1 = rs1 & m;
+  c.src2 = (rs1 >> f) & m;
+  c.dst = (rs1 >> (2 * f)) & m;
+  c.rows = (rs1 >> (3 * f)) & 0xFFFF;
   c.op = (int)(rs2 & 0xF);
   c.bcast = (rs2 >> 4) & 1;
   c.rlen = (rs2 >> 5) & 0x3FF;
   if (c.rlen == 0) c.rlen = 1024;
-  c.dst2 = (rs2 >> 16) & 0x3FFF;   // EXPSUM: row sums at imm[13:0]
+  c.dst2 = (rs2 >> 16) & m;   // EXPSUM: row sums at imm[f-1:0]
   return c;
 }
 

@@ -141,6 +141,7 @@ struct gemmini_state_t
   // the BF16 DRAM output target used by deposit_to_spad.
   bool     mx_scales_used;   // an MX scale load happened -> DRAM LOOP_WS runs the MX model
   uint64_t loop_ws_A_sc, loop_ws_B_sc, loop_ws_A_sc_stride, loop_ws_B_sc_stride;
+  uint64_t loop_ws_A_lut, loop_ws_B_lut;   // LOOP_WS_CONFIG_LUTS: this loop's act-in / weight codebooks (0 = none)
   uint8_t  mx_loop_slot;
   // LoopMatmul's per-slot a_addr_start / b_addr_end: written by LOOP_WS_CONFIG_SPAD_AB (sticky, not cleared when a
   // loop retires), reset to the slot's half; a DRAM loop with a / b spad id 0 reads its A / B there
@@ -200,6 +201,8 @@ public:
   void mx_load_lut(reg_t rs1, reg_t rs2);
   void mx_loop_ws_spad(reg_t rs1, reg_t rs2);
   void mx_loop_ws_dram(reg_t rs1, reg_t rs2);
+  void mx_loop_managed_scales(uint16_t I, uint16_t J, uint16_t K, reg_t TWa, reg_t TWb, uint8_t slot);
+  void mx_loop_managed_luts(uint16_t I, uint16_t J);
   void loop_ws_config_scales(reg_t rs1, reg_t rs2);
   void loop_ws_config_scale_strides(reg_t rs1, reg_t rs2);
 
@@ -257,6 +260,7 @@ private:
   const unsigned loop_ws_config_scale_strides_funct = 32;
   const unsigned vpu_exec_funct                = 33;
   const unsigned spad_requant_funct            = 34;
+  const unsigned loop_ws_config_luts_funct     = 35;
 
   const unsigned fence_funct = 127;
 

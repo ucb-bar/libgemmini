@@ -173,6 +173,10 @@ struct config_t {
 config_t preset_mx_rocket();   // MxGemminiRocketConfig
 config_t preset_e4m3_vpu();    // MxE4M3VpuGemminiRocketConfig: VPU x2, SPAD_REQUANT, ld RS 32, no LUT
 
+// VPU_EXEC / SPAD_REQUANT row-address field width: 15 bits when the scratchpad has more than 16384 rows (the DIM 4 / 8
+// configs, SPAD_ROW_ADDR_BITS 15; gemmini.cc SPAD_RA_F), else 14
+inline unsigned ra_field_bits(const config_t &c) { return c.spad_banks * c.spad_bank_rows > 16384 ? 15u : 14u; }
+
 }  // namespace gperf
 
 #endif
