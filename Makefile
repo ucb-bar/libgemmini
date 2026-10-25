@@ -6,7 +6,9 @@ endif
 
 PREFIX ?= $RISCV/
 
-default: libgemmini.so libgemmini_dim32.so libgemmini_dim8.so libgemmini_dim32q.so libgemmini_dim4.so
+BF16_LIBS = libgemmini_bf16_dim8.so libgemmini_bf16_dim16.so libgemmini_bf16_dim32.so
+
+default: libgemmini.so libgemmini_dim32.so libgemmini_dim8.so libgemmini_dim32q.so libgemmini_dim4.so $(BF16_LIBS)
 
 libgemmini.so: gemmini.cc gemmini_perf.cc $(wildcard perf/*.cc perf/*/*.cc)
 	g++ -L $(RISCV)/lib -Wl,-rpath,$(RISCV)/lib -shared -o $@ -std=c++17 -I $(RISCV)/include -fPIC -O3 $(filter %.cc,$^)
@@ -27,9 +29,14 @@ libgemmini_dim4.so: gemmini.cc gemmini_perf.cc $(wildcard perf/*.cc perf/*/*.cc)
 libgemmini_dim8.so: gemmini.cc gemmini_perf.cc $(wildcard perf/*.cc perf/*/*.cc)
 	g++ -DGEMMINI_DIM=8 -L $(RISCV)/lib -Wl,-rpath,$(RISCV)/lib -shared -o $@ -std=c++17 -I $(RISCV)/include -fPIC -O3 $(filter %.cc,$^)
 
+# Plain BF16 Gemmini (BF16Dim*BaselineConfig), registered as "gemmini_bf16_dim<N>"
+# (run: spike --extension=gemmini_bf16_dim16 ...)
+libgemmini_bf16_dim%.so: gemmini.cc gemmini_perf.cc $(wildcard perf/*.cc perf/*/*.cc)
+	g++ -DGEMMINI_BF16 -DGEMMINI_DIM=$* -L $(RISCV)/lib -Wl,-rpath,$(RISCV)/lib -shared -o $@ -std=c++17 -I $(RISCV)/include -fPIC -O3 $(filter %.cc,$^)
+
 .PHONY: install
-install: libgemmini.so libgemmini_dim32.so libgemmini_dim8.so
-	cp libgemmini.so libgemmini_dim32.so libgemmini_dim8.so $(RISCV)/lib
+install: libgemmini.so libgemmini_dim32.so libgemmini_dim8.so $(BF16_LIBS)
+	cp libgemmini.so libgemmini_dim32.so libgemmini_dim8.so $(BF16_LIBS) $(RISCV)/lib
 
 clean:
 	rm -rf *.o *.so
