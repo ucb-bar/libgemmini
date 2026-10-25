@@ -1203,7 +1203,11 @@ void gemmini_t::mxquant_config_mvout(reg_t rs1, reg_t rs2) {
 // rs2 = op[3:0] | bcast[4] | rlen[14:5] | imm[31:16]. Spad row = DIM bytes = 8 LE BF16 lanes. Inputs are read
 // before any output is written (the RTL reads several rows ahead of its writes), addresses wrap at 14 bits.
 // VPU_EXEC / SPAD_REQUANT row-address field width (RTL VpuCmd.fieldW): 14, 15 when the spad has more rows (DIM=8)
+#ifdef GEMMINI_BF16
+static const unsigned SPAD_RA_F = 14;   // max(14, log2 spad rows); a BF16 spad has 256 KB / (2*DIM) <= 16384 rows
+#else
 static const unsigned SPAD_RA_F = (BANK_NUM * BANK_ROWS > 16384) ? 15 : 14;
+#endif
 static const uint32_t SPAD_RA_FMASK = (1u << SPAD_RA_F) - 1;
 static const uint32_t SPAD_ROW_MASK = BANK_NUM * BANK_ROWS - 1;   // spad row index (power of 2)
 void gemmini_t::vpu_exec(reg_t rs1, reg_t rs2) {
@@ -1551,7 +1555,29 @@ void gemmini_t::mx_loop_ws_dram(reg_t rs1, reg_t rs2) {
 }
 
 void gemmini_t::mvout_spad(reg_t rs1, reg_t rs2) {
-  (void)rs1; (void)rs2;
+#ifdef GEMMINI_BF16
+  // STORE_SPAD (BF16 build): accumulator rows -> pre-activation, acc scale, activation, RNE to BF16 -> spad rows, as the
+  // RTL's acc -> spad bank write. rs1 = dst spad row [31:0] | row stride [63:32] (bit 63: unit stride); rs2 = rows |
+  // cols | acc address, as mvout. Each DIM-col block b of the rows lands as one DIM-row spad tile: row (b*DIM + r)*stride.
+  const uint32_t dst_base = (uint32_t)(rs1 & 0x3FFFFFFF);
+  const uint32_t stride_field = (uint32_t)(rs1 >> 32);
+  const uint32_t step = (stride_field >> 31) ? 1 : stride_field;
+  const uint32_t src = (uint32_t)(rs2 & 0xFFFFFFFF);
+  const auto cols = (rs2 >> addr_len) & 0xFFFF;
+  const auto rows = (rs2 >> (addr_len + 16)) & 0xFFFF;
+  if (!((src >> 31) & 1)) { fprintf(stderr, "STORE_SPAD: only accumulator sources are supported\n"); abort(); }
+  const uint32_t src_row = src & 0x3FFFFFF;
+
+  for (size_t i = 0; i < rows; i++)
+    for (size_t j = 0; j < cols; j++) {
+      const size_t block = j / DIM;
+      const acc_t acc_value = apply_pre_activation_acc(gemmini_state.accumulator.at(src_row + block * DIM + i).at(j % DIM));
+      const elem_t activated = apply_activation_acc(acc_scale(acc_value, gemmini_state.acc_shift));
+      gemmini_state.spad.at(dst_base + (block * DIM + i) * step).at(j % DIM) = round_to_bf16(activated);
+    }
+#else
+  (void)rs1; (void)rs2;   // MX builds model the spad output inside mx_loop_ws_spad
+#endif
 }
 
 void gemmini_t::mx_loop_ws_spad(reg_t rs1, reg_t rs2) {
