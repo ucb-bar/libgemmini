@@ -154,6 +154,12 @@ struct gemmini_state_t
 
   std::vector<uint8_t> mx_scale_a_mem;
   std::vector<uint8_t> mx_scale_b_mem;
+  // Layout each scale byte was written in: 0 never, 1 single (16-wide), 2 quad (32-wide). The RTL scale memory
+  // (ScaleFactorMem.scala:124-178) picks a write's bank / row bits from the operand's LIVE throughput
+  // (mx_multi_elem / mx_multi_elem_act) and a read's from the throughput at the matmul, so a load issued under the
+  // other format comes back scrambled; Spike stores flat, so it checks the two agree instead.
+  std::vector<uint8_t> mx_scale_a_tag;
+  std::vector<uint8_t> mx_scale_b_tag;
   std::vector<uint16_t> mx_smem;
 
   // FP6 LUTs: per-row 16 × 6-bit FP6 E3M2 codes (one byte each, low 6 bits).
@@ -195,6 +201,11 @@ public:
   void loop_ws_config_spad_C(reg_t rs1, reg_t rs2);
   void mxquant_config_mvout(reg_t rs1, reg_t rs2);
   void mx_load_scales(reg_t rs1, reg_t rs2);
+  // operand throughput as the RTL derives it (ExecuteController.scala:191-201): quad iff FP6/FP4, E5M2 or LUT
+  bool mx_act_quad() const;
+  bool mx_wgt_quad() const;
+  void mx_scale_tag(bool wgt, size_t off, size_t n);           // bytes [off, off+n) written in the live layout
+  uint8_t mx_scale_rd(bool wgt, size_t off);                    // a matmul's read of one scale byte (checked)
   void vpu_exec(reg_t rs1, reg_t rs2);
   void spad_requant(reg_t rs1, reg_t rs2);
   void mx_read_smem(reg_t rs1, reg_t rs2);

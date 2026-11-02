@@ -162,6 +162,8 @@ void gemmini_state_t::reset()
   mx_dram_out = false;
   mx_scale_a_mem.clear(); mx_scale_a_mem.resize(8192, 0x7f);
   mx_scale_b_mem.clear(); mx_scale_b_mem.resize(8192, 0x7f);
+  mx_scale_a_tag.assign(8192, 0);
+  mx_scale_b_tag.assign(8192, 0);
   mx_smem.clear(); mx_smem.resize(sp_matrices * DIM * 16, 0);
   mx_lut_a.clear(); mx_lut_a.resize(2048 * 16, 0);
   mx_lut_b.clear(); mx_lut_b.resize(2048 * 16, 0);
@@ -1199,7 +1201,7 @@ void gemmini_t::mxquant_config_mvout(reg_t rs1, reg_t rs2) {
   gemmini_state.mx_lut_update_granularity = rs2 & 0xFFFF;
 }
 
-// VPU_EXEC (MxE4M3VpuGemminiRocketConfig): rs1 = src1[13:0] | src2[27:14] | dst[41:28] | rows[57:42],
+// VPU_EXEC (MxFp4E3M2E4M3VpuGemminiRocketConfig): rs1 = src1[13:0] | src2[27:14] | dst[41:28] | rows[57:42],
 // rs2 = op[3:0] | bcast[4] | rlen[14:5] | imm[31:16]. Spad row = DIM bytes = 8 LE BF16 lanes. Inputs are read
 // before any output is written (the RTL reads several rows ahead of its writes), addresses wrap at 14 bits.
 // VPU_EXEC / SPAD_REQUANT row-address field width (RTL VpuCmd.fieldW): 14, 15 when the spad has more rows (DIM=8)
@@ -1314,6 +1316,7 @@ void gemmini_t::spad_requant(reg_t rs1, reg_t rs2) {
         const size_t a_off = (size_t)b * (size_t)M + (size_t)m;
         if (a_off >= gemmini_state.mx_scale_a_mem.size()) gemmini_state.mx_scale_a_mem.resize(a_off + 1, 0x7f);
         gemmini_state.mx_scale_a_mem[a_off] = scale_code;
+        mx_scale_tag(false, a_off, 1);
       }
       if (lut) {
         const uint8_t *cb = &gemmini_state.mx_lut_c[(size_t)(m >> lut_g) * 16];
@@ -1378,6 +1381,35 @@ void gemmini_t::mx_load_scales(reg_t rs1, reg_t rs2) {
   for (uint32_t r = 0; r < rows; r++)
     for (uint32_t i = 0; i < len; i++)
       dst[dest + r * len + i] = read_from_dram<uint8_t>(dram_addr + (reg_t) r * step + i);
+  mx_scale_tag(sel, dest, (size_t)rows * len);
+}
+
+bool gemmini_t::mx_act_quad() const {
+  return gemmini_state.mx_act_fmt != 0 || gemmini_state.mx_fp8_altfmt || gemmini_state.mx_lut_a_loaded;
+}
+bool gemmini_t::mx_wgt_quad() const {
+  return gemmini_state.mx_wgt_fmt != 0 || gemmini_state.mx_wgt_altfmt || gemmini_state.mx_lut_b_loaded;
+}
+
+void gemmini_t::mx_scale_tag(bool wgt, size_t off, size_t n) {
+  auto &t = wgt ? gemmini_state.mx_scale_b_tag : gemmini_state.mx_scale_a_tag;
+  if (t.size() < off + n) t.resize(off + n, 0);
+  std::fill(t.begin() + off, t.begin() + off + n, (wgt ? mx_wgt_quad() : mx_act_quad()) ? 2 : 1);
+}
+
+uint8_t gemmini_t::mx_scale_rd(bool wgt, size_t off) {
+  const auto &m = wgt ? gemmini_state.mx_scale_b_mem : gemmini_state.mx_scale_a_mem;
+  const auto &t = wgt ? gemmini_state.mx_scale_b_tag : gemmini_state.mx_scale_a_tag;
+  const uint8_t want = (wgt ? mx_wgt_quad() : mx_act_quad()) ? 2 : 1;
+  if (off < t.size() && t[off] && t[off] != want) {
+    fprintf(stderr, "GEMMINI: MX %s scale byte %zu was written while the %s was %s but is read by a %s matmul: the "
+            "RTL scale memory files a scale in the layout of the format live at the write (ScaleFactorMem.scala:"
+            "124-178), so on hardware these scales are scrambled. Issue the consumer's CONFIG_EX before the scale "
+            "load.\n", wgt ? "weight" : "act", off, wgt ? "weight" : "activation", t[off] == 2 ? "quad" : "single",
+            want == 2 ? "quad" : "single");
+    exit(1);
+  }
+  return off < m.size() ? m[off] : 0x7f;
 }
 
 void gemmini_t::mx_read_smem(reg_t rs1, reg_t rs2) {
@@ -1770,6 +1802,7 @@ void gemmini_t::mx_loop_ws_spad(reg_t rs1, reg_t rs2) {
       if (a_off_out >= gemmini_state.mx_scale_a_mem.size())
         gemmini_state.mx_scale_a_mem.resize(a_off_out + 1, 0x7f);
       gemmini_state.mx_scale_a_mem[a_off_out] = scale_code;
+      mx_scale_tag(false, a_off_out, 1);
     }
     for (int jj = 0; jj < GROUP_OUT; jj++)
       out[jj] = mx::fp8_e4m3_to_code(bf16_to_f32(relu_bf16(gemmini_state.mx_smem[smem_base + (size_t)m * N_DIM + bi * GROUP_OUT + jj])) / scale);
@@ -1836,8 +1869,8 @@ void gemmini_t::mx_loop_ws_spad(reg_t rs1, reg_t rs2) {
             for (int c = 0; c < TN; c++) {
               const size_t a_off = sc_rtl ? sc_a + r : group * (size_t)M_DIM + (size_t)(i*TM + r);
               const size_t b_off = sc_rtl ? sc_b + c : group * (size_t)N_DIM + (size_t)(j*TN + c);
-              const uint8_t sa = (a_off < gemmini_state.mx_scale_a_mem.size()) ? gemmini_state.mx_scale_a_mem[a_off] : 0x7f;
-              const uint8_t sb = (b_off < gemmini_state.mx_scale_b_mem.size()) ? gemmini_state.mx_scale_b_mem[b_off] : 0x7f;
+              const uint8_t sa = mx_scale_rd(false, a_off);
+              const uint8_t sb = mx_scale_rd(true, b_off);
               int e = (int)sa + (int)sb - 127;
               uint8_t s_code = (e < 0) ? 0 : (e > 254 ? 254 : (uint8_t)e);
               float s = fpe8m0_decode(s_code);
@@ -1950,8 +1983,8 @@ void gemmini_t::mx_loop_ws_spad(reg_t rs1, reg_t rs2) {
             for (int c = 0; c < TN; c++) {
               const size_t a_off = gemmini_state.mx_scale_act_sel * 4096 + group * (size_t)M_DIM + (size_t)(i*TM + r);
               const size_t b_off = gemmini_state.mx_scale_wgt_sel * 4096 + group * (size_t)N_DIM + (size_t)(j*TN + c);
-              const uint8_t sa = (a_off < gemmini_state.mx_scale_a_mem.size()) ? gemmini_state.mx_scale_a_mem[a_off] : 0x7f;
-              const uint8_t sb = (b_off < gemmini_state.mx_scale_b_mem.size()) ? gemmini_state.mx_scale_b_mem[b_off] : 0x7f;
+              const uint8_t sa = mx_scale_rd(false, a_off);
+              const uint8_t sb = mx_scale_rd(true, b_off);
               int e = (int)sa + (int)sb - 127;
               uint8_t s_code = (e < 0) ? 0 : (e > 254 ? 254 : (uint8_t)e);
               float s = fpe8m0_decode(s_code);
@@ -2048,6 +2081,7 @@ void gemmini_t::mx_loop_ws_spad(reg_t rs1, reg_t rs2) {
             if (a_off_out >= gemmini_state.mx_scale_a_mem.size())
               gemmini_state.mx_scale_a_mem.resize(a_off_out + 1, 0x7f);
             gemmini_state.mx_scale_a_mem[a_off_out] = scale_code;
+            mx_scale_tag(false, a_off_out, 1);
           }
           float scale = fpe8m0_decode(scale_code);
           for (int jj = 0; jj < GROUP_OUT; jj++) {
@@ -2126,8 +2160,8 @@ void gemmini_t::mx_loop_ws_spad(reg_t rs1, reg_t rs2) {
             for (int c = 0; c < TN; c++) {
               const size_t a_off = gemmini_state.mx_scale_act_sel * 4096 + group * (size_t)M_DIM + (size_t)(i*TM + r);
               const size_t b_off = gemmini_state.mx_scale_wgt_sel * 4096 + group * (size_t)N_DIM + (size_t)(j*TN + c);
-              const uint8_t sa = (a_off < gemmini_state.mx_scale_a_mem.size()) ? gemmini_state.mx_scale_a_mem[a_off] : 0x7f;
-              const uint8_t sb = (b_off < gemmini_state.mx_scale_b_mem.size()) ? gemmini_state.mx_scale_b_mem[b_off] : 0x7f;
+              const uint8_t sa = mx_scale_rd(false, a_off);
+              const uint8_t sb = mx_scale_rd(true, b_off);
               int e = (int)sa + (int)sb - 127;
               uint8_t s_code = (e < 0) ? 0 : (e > 254 ? 254 : (uint8_t)e);
               float s = fpe8m0_decode(s_code);
@@ -2183,6 +2217,7 @@ void gemmini_t::mx_loop_ws_spad(reg_t rs1, reg_t rs2) {
             if (a_off_out >= gemmini_state.mx_scale_a_mem.size())
               gemmini_state.mx_scale_a_mem.resize(a_off_out + 1, 0x7f);
             gemmini_state.mx_scale_a_mem[a_off_out] = scale_code;
+            mx_scale_tag(false, a_off_out, 1);
           }
           float scale = fpe8m0_decode(scale_code);
           for (int jj = 0; jj < GROUP_OUT; jj++) {

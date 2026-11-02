@@ -1,3 +1,5 @@
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -48,6 +50,56 @@ config_t preset_firesim() {
   return c;
 }
 
+// The DIM 4 / 8 / 32 and multi-format DIM 16 VPU builds (GemminiConfigs.scala:198-284, ConfigsFP.scala:395-560): the
+// e4m3_vpu RS / VPU / SPAD_REQUANT, but untrimmed -- LoopConv in the command path (frontend depth 10), Im2Col /
+// transposer / MMIO requant present -- and the MxE3M2Vpu memory system (4-bank L2, outerLatencyCycles 128).
+// Not modelled: the L2 bank count and outer MSHRs (memory_system.h: the model's L2 never limits reads in flight).
+static config_t vpu_build(const char *name, int dim) {
+  config_t c = preset_e4m3_vpu();
+  c.preset = name;
+  c.preset_dim = dim;
+  c.frontend_depth = 10;                    // LoopConv present (G:109; trimmed only in e4m3Trimmed, C:663)
+  if (dim == 4) c.spad_capacity_kib = 128;  // C:467
+  if (dim == 32) c.acc_banks = 1;           // C:351
+  return c;
+}
+
+// name -> preset. The DIM 4 / 8 / 32 single-format builds time the same as their multi-format sibling (formats only
+// change which PE modes exist), so each RTL config name maps to one fragment.
+static bool preset_by_name(const std::string &n, config_t &c) {
+  if (n.empty() || n == "mx_rocket") c = preset_mx_rocket();
+  else if (n == "e4m3_vpu") { c = preset_e4m3_vpu(); c.preset_dim = 16; }
+  else if (n == "firesim") { c = preset_firesim(); c.preset_dim = 16; }
+  else if (n == "e3m2_lut") { c = preset_e3m2_lut(); c.preset_dim = 16; }
+  else if (n == "fp4_e3m2_e4m3_vpu") c = vpu_build("fp4_e3m2_e4m3_vpu", 16);     // MxFp4E3M2E4M3Vpu
+  else if (n == "dim4_fp4_e3m2_vpu" || n == "dim4_fp4_vpu" || n == "dim4_e3m2_vpu") c = vpu_build(n.c_str(), 4);
+  else if (n == "dim8_fp4_e3m2_e4m3_vpu" || n == "dim8_e3m2_vpu" || n == "dim8_fp4_vpu") c = vpu_build(n.c_str(), 8);
+  else if (n == "dim32_e4m3_vpu" || n == "dim32_e3m2_vpu" || n == "dim32_fp4_vpu") c = vpu_build(n.c_str(), 32);
+  else return false;
+  return true;
+}
+
+void config_t::finalize() {
+  if (preset_dim && preset_dim != (int)mesh_dim) {
+    fprintf(stderr, "gemmini perf: preset %s is a DIM %d config but mesh.dim is %g (this library is built for DIM %d)\n",
+            preset.c_str(), preset_dim, mesh_dim, GPERF_DEFAULT_DIM);
+    abort();
+  }
+  const double d = mesh_dim, row = spad_row_bytes();
+  auto fill = [this](double &p, const char *name, double v) {
+    if (p == 0) { p = v; derived.push_back(name); }
+  };
+  fill(loop_max_block_len, "loop.max_block_len", std::max(1.0, std::floor(dma_get_bytes / row)));
+  fill(spad_bank_rows, "spad.bank_rows", spad_capacity_kib * 1024 / (spad_banks * row));
+  fill(acc_total_rows, "acc.total_rows", acc_capacity_kib * 1024 * 8 / (64 * d));
+  fill(acc_bank_rows, "acc.bank_rows", acc_total_rows / acc_banks);
+  fill(mesh_fill_latency, "mesh.fill_latency", 2 * d + 1);
+  fill(mesh_commit_latency, "mesh.commit_latency", 3 * d + 3);
+  fill(dma_spad_write_bytes_per_cycle, "dma.spad_write_bytes_per_cycle", row);
+  fill(st_elems_per_acc_read, "st.elems_per_acc_read", 2 * std::max(d, 16.0));
+  fill(sreq_cycles_per_block, "sreq.cycles_per_block", std::max(1.0, 64 / row));
+}
+
 bool config_t::set(const std::string &name, double v) {
 #define GPERF_SET(sec, n, def, doc) if (name == #sec "." #n) { sec##_##n = v; return true; }
   GPERF_PARAMS(GPERF_SET)
@@ -56,9 +108,14 @@ bool config_t::set(const std::string &name, double v) {
 }
 
 void config_t::dump(FILE *f) const {
-  fprintf(f, "gemmini perf config (preset %s):\n", preset.c_str());
+  fprintf(f, "gemmini perf config (preset %s, DIM %g; * = changed from the default, a = derived from DIM):\n",
+          preset.c_str(), mesh_dim);
+  auto mark = [this](const char *name, double v, double def) {
+    for (const std::string &s : derived) if (s == name) return " a";
+    return v != def ? " *" : "  ";
+  };
 #define GPERF_DUMP(sec, n, def, doc) \
-  fprintf(f, "  %-32s %10g%s   %s\n", #sec "." #n, sec##_##n, (sec##_##n != (double)(def)) ? " *" : "  ", doc);
+  fprintf(f, "  %-32s %10g%s   %s\n", #sec "." #n, sec##_##n, mark(#sec "." #n, sec##_##n, (double)(def)), doc);
   GPERF_PARAMS(GPERF_DUMP)
 #undef GPERF_DUMP
 }
@@ -66,11 +123,12 @@ void config_t::dump(FILE *f) const {
 config_t config_t::from_env() {
   config_t c;
   const char *p = getenv("GEMMINI_PERF_CONFIG");
-  if (!p || !*p || !strcmp(p, "mx_rocket")) c = preset_mx_rocket();
-  else if (!strcmp(p, "e4m3_vpu")) c = preset_e4m3_vpu();
-  else if (!strcmp(p, "firesim")) c = preset_firesim();
-  else if (!strcmp(p, "e3m2_lut")) c = preset_e3m2_lut();
-  else { fprintf(stderr, "gemmini perf: unknown GEMMINI_PERF_CONFIG=%s (mx_rocket|e4m3_vpu|firesim|e3m2_lut)\n", p); abort(); }
+  if (!preset_by_name(p ? p : "", c)) {
+    fprintf(stderr, "gemmini perf: unknown GEMMINI_PERF_CONFIG=%s (mx_rocket|e4m3_vpu|firesim|e3m2_lut|"
+                    "fp4_e3m2_e4m3_vpu|dim4_{fp4_e3m2,fp4,e3m2}_vpu|dim8_{fp4_e3m2_e4m3,e3m2,fp4}_vpu|"
+                    "dim32_{e4m3,e3m2,fp4}_vpu)\n", p);
+    abort();
+  }
 
   if (const char *s = getenv("GEMMINI_PERF_SET")) {
     std::string all(s);
@@ -87,6 +145,7 @@ config_t config_t::from_env() {
       pos = end + 1;
     }
   }
+  c.finalize();
   if (getenv("GEMMINI_PERF_DUMP_CONFIG")) c.dump(stderr);
   return c;
 }

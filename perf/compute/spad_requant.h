@@ -20,7 +20,7 @@ namespace gperf {
 class spad_requant_t {
 public:
   spad_requant_t(const config_t &c, event_queue_t &eq, scratchpad_t &sp, reservation_station_t &rs)
-      : eq_(eq), sp_(sp), rs_(rs), dim_((uint32_t)c.mesh_dim), per_block_((cycle_t)c.sreq_cycles_per_block),
+      : eq_(eq), sp_(sp), rs_(rs), row_((uint32_t)c.spad_row_bytes()), per_block_((cycle_t)c.sreq_cycles_per_block),
         fixed_((cycle_t)c.sreq_fixed_cycles) {}
 
   struct cmd_t { uint32_t src, dst, M, N; bool tiled, resident, fp4; };
@@ -30,13 +30,14 @@ public:
             (uint32_t)((rs2 >> 16) & 0xFFFF), (bool)((rs1 >> (2 * f)) & 1), (bool)((rs1 >> (2 * f + 1)) & 1),
             (bool)((rs2 >> 32) & 1)};
   }
-  // exact footprints as the RS computes them (LoopMatmul.scala vec_bypass): BF16 source M*N/8 rows, E4M3
-  // destination M*N/16 rows (M padded to 16 when tiled); FP4: two codes a byte, M*N/32 rows (M padded to 32)
-  span_t read_span(const cmd_t &c) const { return make_span(local_addr_t{c.src}, (uint64_t)c.M * c.N * 2 / dim_, false); }
+  // exact footprints as the RS computes them (SpadRequantRows, R = spad row bytes, 16 at DIM 16): BF16 source
+  // M*N*2/R rows, E4M3 destination M*N/R rows (M padded to R when tiled); FP4: two codes a byte, M*N/(2R) rows (M
+  // padded to 2R)
+  span_t read_span(const cmd_t &c) const { return make_span(local_addr_t{c.src}, (uint64_t)c.M * c.N * 2 / row_, false); }
   span_t write_span(const cmd_t &c) const {
-    const uint32_t pad = c.fp4 ? 31 : 15;
-    const uint64_t m = c.tiled ? ((c.M + pad) & ~pad) : c.M;
-    return make_span(local_addr_t{c.dst}, m * c.N / (c.fp4 ? 2 * dim_ : dim_), true);
+    const uint32_t pad = (c.fp4 ? 2 * row_ : row_) - 1;
+    const uint64_t m = c.tiled ? ((c.M + pad) & ~(uint64_t)pad) : c.M;
+    return make_span(local_addr_t{c.dst}, m * c.N / (c.fp4 ? 2 * row_ : row_), true);
   }
 
   bool has_room() const { return !busy_; }
@@ -47,7 +48,8 @@ public:
     fp4_ = c.fp4;
     const uint64_t blocks = (uint64_t)c.M * c.N / 32;
     const cycle_t now = eq_.now();
-    // reads pace the blocks (4 rows each, per_block_ cycles); the 2 written rows per block trail them
+    // reads pace the blocks (64/R rows each, per_block_ cycles); the 32/R written rows per block trail them
+    // (E4M3; the RTL's 4-bit output writes 16/R a block -- not modelled yet, plan 14.2)
     auto left = std::make_shared<int>(2);
     auto part = [this, rs_id, left](cycle_t t) {
       if (--*left > 0) return;
@@ -59,14 +61,14 @@ public:
       });
     };
     sp_.read_port(c.src).request(SP_SREQ, now + 1, (cycle_t)blocks * per_block_, part);
-    sp_.write_port(c.dst).request(SP_SREQ, now + 1 + per_block_, (cycle_t)blocks * 2, part);
+    sp_.write_port(c.dst).request(SP_SREQ, now + 1 + per_block_, (cycle_t)(blocks * 32 / row_), part);
   }
 
 private:
   event_queue_t &eq_;
   scratchpad_t &sp_;
   reservation_station_t &rs_;
-  uint32_t dim_;
+  uint32_t row_;
   cycle_t per_block_, fixed_;
   bool busy_ = false, fp4_ = false;
   std::function<void()> done_cb_;

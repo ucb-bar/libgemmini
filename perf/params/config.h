@@ -11,11 +11,28 @@
 //   GEMMINI_PERF_DUMP_CONFIG=1                                     print the resolved parameters at start
 //
 // Mesh size: the kernel is compiled for one DIM (tile counts and spad addresses are in the instruction stream),
-// so mesh.dim must match the DIM the program was built for; changing it means recompiling the kernel.
+// so mesh.dim must match the DIM the program was built for; changing it means recompiling the kernel. mesh.dim
+// defaults to the DIM this library is built for (-DGEMMINI_DIM), and a preset for another DIM aborts.
 // Everything else (queues, banks, bandwidths, latencies, unit counts) can change freely under the same program.
+//
+// "[auto]" parameters default to 0 and are derived from mesh.dim (and the capacities) after the preset and
+// GEMMINI_PERF_SET are applied (config_t::finalize); setting one explicitly keeps that value. Formulas and RTL
+// sources are at finalize() in config.cc.
 
 #include <cstdio>
 #include <string>
+#include <vector>
+
+#ifdef GEMMINI_DIM
+#define GPERF_DEFAULT_DIM GEMMINI_DIM
+#else
+#define GPERF_DEFAULT_DIM 16
+#endif
+#ifdef GEMMINI_E4M3_NATIVE_QUAD
+#define GPERF_DEFAULT_ELEM_BYTES 2   // native E4M3 quad build: one spad element = two E4M3 codes
+#else
+#define GPERF_DEFAULT_ELEM_BYTES 1
+#endif
 
 // X(section, name, default, meaning / source)
 #define GPERF_PARAMS(X) \
@@ -49,7 +66,7 @@
   X(frontend, latency,              5,    "cycles from RoCC issue to LoopMatmul input") \
   /* --- LoopMatmul (LoopMatmul.scala) --- */ \
   X(loop, concurrent_loops,         2,    "loop slots; a 3rd LOOP_WS waits for the head slot (:1133)") \
-  X(loop, max_block_len,            4,    "DIM-wide blocks per loop-issued mvin (:1101)") \
+  X(loop, max_block_len,            0,    "[auto] DIM-wide blocks per loop-issued mvin: max(1, dma.get_bytes / spad row bytes) = 64/DIM (LoopMatmul.scala:1128,1177-1183; header MAX_BLOCK_LEN)") \
   X(loop, max_ld_outstanding,       8,    "loop-issued loads in the RS, not completed (rob_overloaded :1198)") \
   X(loop, max_ex_outstanding,       16,   "loop-issued ex commands in the RS, not completed") \
   X(loop, max_st_outstanding,       4,    "loop-issued stores in the RS, not completed") \
@@ -62,22 +79,25 @@
   X(rs, st_entries,                 4,    "store queue entries") \
   X(rs, vec_entries,                16,   "vector (VPU / SPAD_REQUANT) queue entries; only with a VPU") \
   /* --- mesh / execute (ExecuteController.scala, MeshWithDelays.scala) --- */ \
-  X(mesh, dim,                      16,   "mesh rows = cols = DIM; must match the kernel build") \
+  X(mesh, dim,                      GPERF_DEFAULT_DIM, "mesh rows = cols = DIM; must match the kernel build (default: this library's GEMMINI_DIM)") \
+  X(mesh, elem_bytes,               GPERF_DEFAULT_ELEM_BYTES, "scratchpad bytes per element: spad row = DIM * this (2 only in the native E4M3 quad build)") \
   X(ex, queue_length,               8,    "issued ex commands waiting in the ExecuteController queue (:229)") \
   X(mesh, issue_latency,            3,    "compute issue -> first A row into the mesh (spad req -> a_buf)") \
-  X(mesh, fill_latency,             33,   "first A row in -> first output row") \
-  X(mesh, commit_latency,           51,   "first A row in -> last accumulator commit") \
+  X(mesh, fill_latency,             0,    "[auto] first A row in -> first output row: 2*DIM + 1 (input skew DIM-1 + column hops + output delay 1 + de-skew = 2*DIM, MeshWithDelays.scala:115-127,220-226; +1 fitted at DIM 16: 33)") \
+  X(mesh, commit_latency,           0,    "[auto] first A row in -> last accumulator commit: fill + (DIM-1) + 3 = 3*DIM + 3 (last output row, acc_latency 3; fitted at DIM 16: 51)") \
   X(mesh, min_rows,                 4,    "minimum rows per request (same-address acc write spacing, :430-438)") \
   X(mesh, drain_extra,              2,    "cycles a CONFIG_EX / CONFIG_SCALE_MEM adds after the mesh drains") \
   X(mesh, lone_preload_cycles,      5,    "a preload with new weights reaching an idle mesh is its own request (dramloop FSDB: +5 then the compute)") \
   /* --- scratchpad (Scratchpad.scala; banks x rows ConfigsFP.scala:236,242) --- */ \
   X(spad, banks,                    4,    "scratchpad banks") \
-  X(spad, bank_rows,                4096, "rows per bank (one row = DIM bytes)") \
+  X(spad, capacity_kib,             256,  "sp_capacity (ConfigsFP.scala:242; 128 in the DIM 4 builds, :467)") \
+  X(spad, bank_rows,                0,    "[auto] rows per bank: capacity / (banks * spad row bytes) (GemminiConfigs.scala:143-145): 8192 / 8192 / 4096 / 2048 at DIM 4 / 8 / 16 / 32") \
   /* --- accumulator (AccumulatorMem.scala; ConfigsFP.scala:245,343) --- */ \
-  X(acc, banks,                     2,    "accumulator banks: stores read one bank while the mesh writes the other") \
-  X(acc, bank_rows,                 256,  "accumulator rows per bank") \
+  X(acc, banks,                     2,    "accumulator banks: stores read one bank while the mesh writes the other (1 in the DIM 32 builds, ConfigsFP.scala:351)") \
+  X(acc, capacity_kib,              64,   "acc_capacity (ConfigsFP.scala:245); one logical row = DIM 64-bit entries") \
+  X(acc, bank_rows,                 0,    "[auto] accumulator rows per bank: total_rows / banks") \
   X(acc, overwrite_blocks_reads,    0,    "[knob, RTL] 0: only an ACCUMULATING mesh write holds the bank's read port (AccumulatorMem.scala:667: read.req.ready = !(write.valid && write.acc)); an overwriting tile leaves store reads alone. 1 = every tile holds it (older model)") \
-  X(acc, total_rows,                512,  "max_acc_addr: loop C bases alternate by total_rows / concurrent_loops") \
+  X(acc, total_rows,                0,    "[auto] max_acc_addr: capacity * 8 / (64 * DIM) = 8192/DIM (GemminiConfigs.scala:147-149); loop C bases alternate by total_rows / concurrent_loops") \
   /* --- load path (LoadController.scala, DMA.scala StreamReader, BeatMerger.scala) --- */ \
   X(ld, queue_length,               8,    "issued mvins waiting in the LoadController queue (ConfigsFP.scala:228)") \
   X(ld, start_latency,              6,    "[measured] a load command's last row written -> the next waiting command's first Get (cmd tracker -> LoadController -> DMA -> reader -> TLB -> A: last response -> next Get 7 in the llama_e2e_elemwise FSDB)") \
@@ -88,7 +108,7 @@
   X(dma, max_in_flight,             32,   "outstanding Gets (max_in_flight_mem_reqs)") \
   X(dma, free_latency,              3,    "[measured] ooo_free: a response -> the next Get when the tracker is full (llama_e2e_elemwise FSDB: 3 for 290 of 293, perf_reissue.py)") \
   X(dma, ooo_free,                  1,    "[knob, RTL] 1: a response is packed into the scratchpad when it arrives and frees its tracker slot then (XactTracker pop on the beat packer's last beat, DMA.scala:84-85: arrival order); 0: merged and freed in request order (older model)") \
-  X(dma, spad_write_bytes_per_cycle,16,   "BeatMerger: one DIM-byte spad row per cycle") \
+  X(dma, spad_write_bytes_per_cycle,0,    "[auto] BeatMerger: one spad row per cycle = DIM * mesh.elem_bytes bytes (BeatMerger.scala:39-48,68)") \
   X(dma, put_bytes,                 64,   "bytes per TileLink Put") \
   X(dma, max_puts_in_flight,        32,   "outstanding Puts (StreamWriter)") \
   /* --- store path (StoreController.scala, Scratchpad.scala write path, MxRequantizer.scala) --- */ \
@@ -101,7 +121,7 @@
   X(st, spad_read_interval,        4,    "[measured] acc -> scratchpad store (requant_to_spad): one acc read per 4 cycles -- a read is accepted only after the previous result's two bank-row writes (dma_resp_ready, Scratchpad.scala:1127-1131; attn_flash_llama_2h_fused FSDB: 24 reads, ready 1 cycle in 4, mesh idle)") \
   X(st, pipe_latency,               12,   "store command issued -> its first Put (128x128 FSDB: mvout -> first Put 13)") \
   X(st, write_slack,                8,    "Puts of a store still waiting for the bus when the next store may start (write queues)") \
-  X(st, elems_per_acc_read,         32,   "output elements per accumulator read / requantizer beat") \
+  X(st, elems_per_acc_read,         0,    "[auto] output elements per accumulator read / requantizer beat: half a (widened) acc row = 2 * max(DIM, 16) (Scratchpad.scala:352-356; AccumulatorMem.scala:134-137; MxAccWiden at DIM < 16)") \
   /* --- memory system: L2 (InclusiveCache) + DRAM. Calibrated, not derivable from the RTL --- */ \
   X(mem, line_bytes,                64,   "cache line") \
   X(mem, host_tracking,             1,    "[knob] the CPU's memory traffic: 0 none; 1 stores only (approximate L1 below, for probes; fast); 2 spike's cache_sim_t as the L1 D$ (+ I$, host.icache) over every load/store/fetch: probes from its contents and miss stalls on the CPU clock (host.l1_*)") \
@@ -152,7 +172,7 @@
   X(vpu, rows_per_cycle,            1,    "scratchpad rows per cycle per unit") \
   X(vpu, latency,                   5,    "row issue -> its write: s0, s1, s2, s3 (EXPSUM build), write reg (vpu/Vpu.scala)") \
   X(vpu, bank_conflict_cycles,      1,    "extra cycle when src2 is in the same bank as src1") \
-  X(sreq, cycles_per_block,         4,    "SPAD_REQUANT cycles per 32-element block") \
+  X(sreq, cycles_per_block,         0,    "[auto] SPAD_REQUANT cycles per 32-element block: its BF16 source rows, one read per cycle = 64 / spad row bytes (SpadRequant.scala:104-107,132-141)") \
   X(sreq, fixed_cycles,             9,    "SPAD_REQUANT start wait + tail")
 
 namespace gperf {
@@ -162,14 +182,19 @@ struct config_t {
   GPERF_PARAMS(GPERF_FIELD)
 #undef GPERF_FIELD
   std::string preset = "mx_rocket";
+  int preset_dim = 0;                 // the DIM the preset's RTL config is built for (0: any)
+  std::vector<std::string> derived;   // [auto] parameters finalize() filled in
 
   // GEMMINI_PERF_CONFIG / GEMMINI_PERF_SET / GEMMINI_PERF_DUMP_CONFIG, as above. Aborts on an unknown name.
   static config_t from_env();
   bool set(const std::string &dotted_name, double value);   // "rs.ex_entries"; false if unknown
+  void finalize();                    // fill the [auto] parameters from mesh.dim; abort on a preset / DIM mismatch
   void dump(FILE *f) const;
+  double spad_row_bytes() const { return mesh_dim * mesh_elem_bytes; }
 };
 
-// Presets: the config fragments. Each starts from the defaults above.
+// Presets: the config fragments. Each starts from the defaults above. GEMMINI_PERF_CONFIG takes the name without
+// "preset_"; config.cc lists them all.
 config_t preset_mx_rocket();   // MxGemminiRocketConfig
 config_t preset_e4m3_vpu();    // MxE4M3VpuGemminiRocketConfig: VPU x2, SPAD_REQUANT, ld RS 32, no LUT
 

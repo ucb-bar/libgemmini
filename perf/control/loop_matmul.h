@@ -23,7 +23,7 @@ namespace gperf {
 //   LdA/LdB mvins of A (I x ceil(K/4)) and B (K x ceil(J/4)) from DRAM, 4 DIM-wide blocks each.
 //   Ex      [managed CONFIG_SCALE_MEM first, once its loop's scale loads have left] then preload+compute per
 //           (k, j, i), k outer, i inner. Gated on the A and B mvins it reads having left.
-//   StC     C to DRAM: two commands per (i, group of 4 j tiles) (numChunks = 2, single throughput).
+//   StC     C to DRAM: numChunks commands per (i, group of 4 j tiles) (2 at DIM >= 16, single throughput).
 //   StCSpad C to the scratchpad (LOOP_WS spad variant): one per (i, j).
 // A store waits until the last-k compute of its tiles has left (the loop's last store: every compute). Each class
 // (ld / ex / st) keeps at most loop.max_*_outstanding loop-issued commands in the RS that have not completed.
@@ -105,27 +105,33 @@ private:
   bool make(const loop_t &l, int li, loop_kind_t k, cycle_t now, loop_cmd_t *o) const;
   bool ld_blocked(const loop_t &l, loop_kind_t k) const;
   uint64_t unroller_loop(loop_kind_t k) const;
-  // StC chunking (LoopMatmul.scala:573-577, 714-720): one chunk = one acc chunk = mbl/2 j tiles (32 BF16 columns,
-  // whole 64 B lines); a j group of gb tiles stores gb * numChunks / 4 chunks (at least 1), so a 2-tile group is ONE
-  // chunk, not two halves.
+  // StC (LoopMatmulStC, built with max_block_len 1, LoopMatmul.scala:1185): one store per acc chunk of an (i, 4-tile j
+  // group), numChunks = 2 chunks a group at DIM >= 16, DIM/8 below (:573); a partial last group stores
+  // tiles * numChunks / 4 (at least 1, :714-716), so a 2-tile group at DIM 16 is ONE chunk, not two halves.
+  // DIM < 16 quad (dim8_fold, :696-700, 734): one store per W = MxAccWiden j tiles (the widened acc row holds them).
   // LoopMatmulStCSpad (single throughput, LoopMatmul.scala:821-980): one store per 2-tile chunk of a 4-tile j group
-  // (chunks_this_j = tiles / 2), groups outer, i inner; every chunk's acc range is its group's DIM rows
+  // (chunks_this_j = tiles / 2), groups outer, i inner; every chunk's acc range is its group's DIM rows. At DIM < 16
+  // the group index steps by W (jStep, :984): the widened row of group g also holds groups g+1..g+W-1.
   static uint32_t sts_group_tiles(uint32_t J, uint32_t g) { return (g + 1) * 4 > J && J % 4 ? J % 4 : 4; }
   static uint32_t sts_chunks(uint32_t J, uint32_t g) { return std::max(1u, sts_group_tiles(J, g) / 2); }
-  static uint32_t sts_per_i(uint32_t J) {
+  uint32_t sts_per_i(uint32_t J) const {
     uint32_t n = 0;
-    for (uint32_t g = 0; g < (J + 3) / 4; g++) n += sts_chunks(J, g);
+    for (uint32_t g = 0; g < (J + 3) / 4; g += widen_) n += sts_chunks(J, g);
     return n;
   }
-  uint32_t stc_tiles() const { return std::max(1u, mbl_ / 2); }
-  uint32_t stc_chunks(uint32_t gb) const { return std::max(1u, gb / stc_tiles()); }
-  uint32_t stc_per_i(uint32_t J) const {
-    const uint32_t g = (J + mbl_ - 1) / mbl_;
-    return g ? (g - 1) * stc_chunks(mbl_) + stc_chunks(J - (g - 1) * mbl_) : 0;
+  uint32_t stc_tiles() const { return 4 / stc_nch_; }
+  uint32_t stc_chunks(uint32_t gb) const { return std::max(1u, gb * stc_nch_ / 4); }
+  uint32_t stc_per_i(uint32_t J, bool multi) const {
+    if (multi && widen_ > 1) return (J + widen_ - 1) / widen_;
+    const uint32_t g = (J + 3) / 4;
+    return g ? (g - 1) * stc_chunks(4) + stc_chunks(J - (g - 1) * 4) : 0;
   }
 
   int max_loops_;
   uint32_t mbl_, lim_ld_, lim_ex_, lim_st_, dim_, acc_half_, spad_half_, tiles_per_mx_block_;
+  uint32_t widen_;     // MxAccWiden: j tiles per acc row, 16/DIM at DIM < 16 (MxConfigFragments.scala:177)
+  uint32_t stc_nch_;   // StC acc chunks per 4-tile j group (LoopMatmul.scala:573)
+  uint32_t bf16_beats_, tiled_span_;   // RS StCSpad range tails (ReservationStation.scala:333-335)
   loop_t cfg_;                    // the loop being configured
   std::deque<loop_t> active_;     // configured loops, oldest first
   uint32_t out_[3] = {0, 0, 0};   // loop-issued RS entries not completed, per class
