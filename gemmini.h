@@ -117,6 +117,7 @@ struct gemmini_state_t
   uint8_t mx_wgt_fmt;
   uint8_t mx_out_fmt;
   uint8_t mx_use_lut;
+  uint8_t mx_act_fp6d = 0, mx_wgt_fp6d = 0;   // direct FP6 operand (fmt 1, LUT off): bit0 on, bit1 = E2M3 (alt)
   uint8_t mx_fp8_altfmt;   // config_ex rs1 bit 6: activation (and output) sub-format alt select
   uint8_t mx_wgt_altfmt;   // effective weight sub-format alt = mx_fp8_altfmt ^ rs1 bit 31 (per-operand)
   uint8_t mx_lut_en;       // G1: runtime LUT-usage flag (MX_LOAD_LUT sets, MX_LUT_DISABLE clears, default 0)
@@ -142,6 +143,11 @@ struct gemmini_state_t
   bool     mx_scales_used;   // an MX scale load happened -> DRAM LOOP_WS runs the MX model
   uint64_t loop_ws_A_sc, loop_ws_B_sc, loop_ws_A_sc_stride, loop_ws_B_sc_stride;
   uint64_t loop_ws_A_lut, loop_ws_B_lut;   // LOOP_WS_CONFIG_LUTS: this loop's act-in / weight codebooks (0 = none)
+  // Mixed-K loop (LOOP_WS_CONFIG_KMIX / KMASK / KMIX_A, consumed by the next LOOP_WS): kmask bit = 1 -> K-block in the
+  // loop's (low-precision) formats; 0 -> plain: B from kmix_B (E4M3-single or direct FP6), A from akmix_A (KMIX_A)
+  bool kmix = false, akmix = false;
+  uint64_t kmix_B = 0, kmix_B_stride = 0, akmix_A = 0, kmask[2] = {0, 0};
+  uint8_t kmix_fp6 = 0, akmix_fp6 = 0;     // rs2[63:62] = {direct, alt}
   uint8_t  mx_loop_slot;
   // LoopMatmul's per-slot a_addr_start / b_addr_end: written by LOOP_WS_CONFIG_SPAD_AB (sticky, not cleared when a
   // loop retires), reset to the slot's half; a DRAM loop with a / b spad id 0 reads its A / B there
@@ -150,6 +156,9 @@ struct gemmini_state_t
   uint64_t mx_asc_addr[2], mx_asc_stride[2];
   uint16_t mx_asc_I[2], mx_asc_K[2];
   uint64_t mx_dram_C, mx_dram_C_stride;
+  uint32_t mx_dram_rows = 0;   // native DRAM loop: C rows to store (pad_I); 0 = all
+  uint8_t mx_lut_kb = 0;       // LOOP_WS rs2[12]: one weight-codebook set per K-block of the loop
+  uint32_t mx_lut_kb_cbs = 0;  // codebooks per set (the loop's weight cols >> G)
   bool     mx_dram_out;
 
   std::vector<uint8_t> mx_scale_a_mem;
@@ -161,6 +170,11 @@ struct gemmini_state_t
   std::vector<uint8_t> mx_scale_a_tag;
   std::vector<uint8_t> mx_scale_b_tag;
   std::vector<uint16_t> mx_smem;
+  // BF16 C written to the accumulator by an MX loop (C address bit 31): row-major M x N from acc row mx_acc_row.
+  // An acc mvout reads it in the 2x32 layout (one 2*DIM x 2*DIM C block per DIM acc rows, 2 C rows per acc row).
+  std::vector<uint16_t> mx_acc_smem;
+  bool mx_acc_valid = false, mx_acc_dest = false;
+  uint32_t mx_acc_row = 0, mx_acc_M = 0, mx_acc_N = 0;
 
   // FP6 LUTs: per-row 16 × 6-bit FP6 E3M2 codes (one byte each, low 6 bits).
   // Indexing: lut_x[lut_idx * 16 + entry] = code.
@@ -211,7 +225,9 @@ public:
   void mx_read_smem(reg_t rs1, reg_t rs2);
   void mx_load_lut(reg_t rs1, reg_t rs2);
   void mx_loop_ws_spad(reg_t rs1, reg_t rs2);
+  bool mx_mvout_acc(reg_t dram_addr, uint32_t row, size_t rows, size_t cols);
   void mx_loop_ws_dram(reg_t rs1, reg_t rs2);
+  void mx_loop_ws_dram_kmix(reg_t rs1, reg_t rs2);
   void mx_loop_managed_scales(uint16_t I, uint16_t J, uint16_t K, reg_t TWa, reg_t TWb, uint8_t slot);
   void mx_loop_managed_luts(uint16_t I, uint16_t J);
   void loop_ws_config_scales(reg_t rs1, reg_t rs2);
@@ -272,6 +288,9 @@ private:
   const unsigned vpu_exec_funct                = 33;
   const unsigned spad_requant_funct            = 34;
   const unsigned loop_ws_config_luts_funct     = 35;
+  const unsigned loop_ws_config_kmix_funct     = 36;
+  const unsigned loop_ws_config_kmask_funct    = 37;
+  const unsigned loop_ws_config_kmix_a_funct   = 39;
 
   const unsigned fence_funct = 127;
 
